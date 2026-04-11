@@ -1,0 +1,808 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
+import {IAaveV3Pool}          from "./interfaces/IAaveV3Pool.sol";
+import {IMorphoVault}         from "./interfaces/IMorphoVault.sol";
+import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
+import {IDivigentVaultRouter} from "./interfaces/IDivigentVaultRouter.sol";
+import {DivigentFeeCollector} from "./DivigentFeeCollector.sol";
+import {DvUSDC}               from "./dvUSDC.sol";
+
+/// @title  DivigentVaultRouter
+/// @author Divigent Protocol
+/// @notice Central orchestration contract for the Divigent Protocol.
+///         Routes idle USDC from agent wallets into the highest-yielding audited DeFi
+///         vault (Aave V3 or Morpho on Base), mints dvUSDC receipt tokens on deposit,
+///         and redeems them on withdrawal — deducting a 10% fee on yield only.
+///
+/// @dev    ── Architecture ─────────────────────────────────────────────────────
+///         VaultRouter is the hub of the protocol:
+///           - Holds all pooled aTokens (Aave) and MetaMorpho shares (Morpho).
+///           - Manages per-wallet principal tracking for fee calculation.
+///           - Consults DivigentYieldOracle to select the optimal deposit target.
+///           - Delegates fee collection to DivigentFeeCollector.
+///           - Mints/burns dvUSDC via the DvUSDC token contract.
+///
+///         ── Non-Custodial Claim ──────────────────────────────────────────────
+///         "Non-custodial" means: VaultRouter holds ZERO USDC at rest between
+///         transactions. USDC moves from agent wallet → Aave/Morpho within the
+///         same transaction, never parked in the router. VaultRouter does hold
+///         aTokens/vault shares — these are immutable contract claims on user funds
+///         with no admin steal vector. Contrast with custodial models where an
+///         admin key can redirect user USDC.
+///
+///         ── Protocol Invariants (Echidna / Certora targets) ──────────────────
+///         [INV-1] Solvency:
+///             totalVaultAssets() >= totalDepositedUSDC at all times.
+///         [INV-2] Principal preservation:
+///             For any withdrawal, fee == 0 when yieldEarned == 0.
+///             fee == (yieldEarned * FEE_BPS) / BPS_DENOMINATOR always.
+///         [INV-3] Fee bound:
+///             fee <= (yieldEarned * 10) / 100 — fee rate cannot exceed 10%.
+///         [INV-4] Statelessness:
+///             USDC.balanceOf(address(this)) == 0 after every deposit() and withdraw().
+///         [INV-5] Permissionless exit:
+///             No state transition blocks a withdrawal if Aave/Morpho allows redemption.
+///
+///         ── Security Properties ──────────────────────────────────────────────
+///         - ReentrancyGuard: all state changes happen before external calls (CEI).
+///         - Emergency pause: only new deposits can be paused (EMERGENCY_MULTISIG).
+///           Withdrawals are ALWAYS enabled — the pause modifier is never applied to withdraw().
+///         - TVL cap: contract-enforced, expands deterministically at day 31 and day 91.
+///         - First-depositor inflation attack: mitigated by virtual +1 offset in share maths.
+///         - Donation attack: totalVaultAssets() reads live vault balances, not an internal
+///           counter, so a donation inflates pricePerShare proportionally without stealing
+///           from existing depositors.
+///         - Wallet self-registration: initialize() only registers msg.sender; no third
+///           party can register an arbitrary wallet. EIP-712 initializeFor() enables
+///           gasless onboarding with a signed authorisation from the wallet owner.
+///         - Operator model: wallets can grant operators deposit/withdraw rights without
+///           transferring custody — the wallet remains the sole dvUSDC holder.
+///         - Oracle freshness: _deposit() reverts with StaleOracle() if the oracle has
+///           not been updated within MAX_STALENESS (2 hours), preventing routing decisions
+///           based on stale rates.
+///         - Amount-aware safety: _canAllocate() checks vault-specific capacity before
+///           routing; if the primary vault is full, the alternate is tried; both-full
+///           reverts with NoSafeRoute(amount) rather than silently failing or holding USDC.
+///         - Exact-asset Morpho redemption: uses withdraw(assets, ...) instead of
+///           convertToShares + redeem to eliminate share-rounding under-redemption risk.
+///         - Actual-gross fee: fee is computed from USDC.balanceOf(this) after all vault
+///           redemptions, not a pre-estimated gross, so rounding never charges fee on principal.
+///
+/// @custom:security-contact security@divigent.xyz
+contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
+    using SafeERC20 for IERC20;
+
+    // ── Constants ─────────────────────────────────────────────────────────────
+
+    /// @notice TVL cap at deployment: $500,000 USDC (6 decimals).
+    uint256 public constant TVL_CAP_INITIAL = 500_000e6;
+
+    /// @notice TVL cap after day 31: $2,000,000 USDC.
+    uint256 public constant TVL_CAP_DAY_31  = 2_000_000e6;
+
+    /// @notice TVL cap removed after day 91 (uint256 max effectively removes the cap).
+    uint256 public constant TVL_CAP_REMOVED = type(uint256).max;
+
+    /// @notice Seconds after deployment when the TVL cap expands.
+    uint256 public constant DAY_31_OFFSET = 31 days;
+
+    /// @notice Seconds after deployment when the TVL cap is fully removed.
+    uint256 public constant DAY_91_OFFSET = 91 days;
+
+    /// @notice Minimum deposit amount: $10 USDC (protects against dust attacks
+    ///         and ensures share minting doesn't degenerate to zero).
+    uint256 public constant MIN_DEPOSIT = 10e6;
+
+    /// @notice Virtual offset used in share minting to prevent first-depositor attacks.
+    ///         Adding 1 to both totalSupply and totalAssets makes the first deposit
+    ///         behave identically to subsequent deposits — no inflation vector.
+    uint256 private constant VIRTUAL_OFFSET = 1;
+
+    /// @dev EIP-712 type hash for the initializeFor() signed authorisation.
+    ///      Nonce is included so each signature is single-use by construction,
+    ///      independent of any state change that follows.
+    bytes32 private constant INITIALIZE_FOR_TYPEHASH =
+        keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
+
+    // ── Immutables ────────────────────────────────────────────────────────────
+
+    /// @notice USDC token on Base mainnet (6 decimals).
+    IERC20 public immutable USDC;
+
+    /// @notice Aave V3 Pool on Base mainnet.
+    IAaveV3Pool public immutable AAVE_POOL;
+
+    /// @notice aUSDC token on Base mainnet (Aave receipt token, 6 decimals).
+    IERC20 public immutable A_TOKEN;
+
+    /// @notice MetaMorpho USDC vault (ERC-4626) on Base mainnet.
+    IMorphoVault public immutable MORPHO_VAULT;
+
+    /// @notice DivigentYieldOracle for optimal vault selection.
+    IDivigentYieldOracle public immutable ORACLE;
+
+    /// @notice DivigentFeeCollector for fee deduction and treasury routing.
+    DivigentFeeCollector public immutable FEE_COLLECTOR;
+
+    /// @notice DvUSDC receipt token contract.
+    DvUSDC public immutable DV_USDC;
+
+    /// @notice 2-of-3 Gnosis Safe multisig with emergency pause authority.
+    ///         Cannot call withdraw, redirect funds, or modify fees.
+    address public immutable EMERGENCY_MULTISIG;
+
+    /// @notice Block timestamp at contract deployment (for TVL cap schedule).
+    uint256 public immutable DEPLOYMENT_TIME;
+
+    // ── Mutable State ─────────────────────────────────────────────────────────
+
+    /// @notice Whether new deposits are paused (emergency only).
+    ///         Withdrawals are NEVER paused.
+    bool public depositsPaused;
+
+    /// @notice Set of wallets authorised to interact with this router.
+    mapping(address => bool) public authorizedWallets;
+
+    /// @notice Principal cost basis per wallet in USDC (6 decimals).
+    ///         Tracks the cumulative USDC deposited minus principal already withdrawn.
+    ///         Used exclusively for calculating yield earned at withdrawal time.
+    mapping(address => uint256) public costBasisUSDC;
+
+    /// @notice Operator approvals: isOperator[wallet][operator] == true means
+    ///         `operator` may call deposit() and withdraw() on behalf of `wallet`.
+    ///         The wallet retains full control and may revoke at any time.
+    mapping(address => mapping(address => bool)) public isOperator;
+
+    /// @notice Per-wallet nonce for initializeFor() EIP-712 signatures.
+    ///         Incremented after each successful initializeFor() call, making
+    ///         every signature single-use by construction — independent of the
+    ///         WalletAlreadyAuthorised() guard that fires afterward.
+    mapping(address => uint256) public nonces;
+
+    // ── Constructor ───────────────────────────────────────────────────────────
+
+    /// @param usdc              USDC address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 on Base).
+    /// @param aavePool          Aave V3 Pool (0x18cd499E3d7ed42fEBFCbf98a1d306f4ccc4d934 on Base).
+    /// @param aToken            aUSDC address on Base.
+    /// @param morphoVault       MetaMorpho USDC vault address on Base.
+    /// @param oracle            DivigentYieldOracle address.
+    /// @param feeCollector      DivigentFeeCollector address.
+    /// @param dvUsdc            DvUSDC token address (must have this contract as VAULT_ROUTER).
+    /// @param emergencyMultisig 2-of-3 Gnosis Safe multisig address.
+    constructor(
+        address usdc,
+        address aavePool,
+        address aToken,
+        address morphoVault,
+        address oracle,
+        address feeCollector,
+        address dvUsdc,
+        address emergencyMultisig
+    )
+        EIP712("DivigentVaultRouter", "1")
+    {
+        require(usdc              != address(0), "Router: zero USDC");
+        require(aavePool          != address(0), "Router: zero aavePool");
+        require(aToken            != address(0), "Router: zero aToken");
+        require(morphoVault       != address(0), "Router: zero morpho");
+        require(oracle            != address(0), "Router: zero oracle");
+        require(feeCollector      != address(0), "Router: zero feeCollector");
+        require(dvUsdc            != address(0), "Router: zero dvUsdc");
+        require(emergencyMultisig != address(0), "Router: zero multisig");
+
+        USDC               = IERC20(usdc);
+        AAVE_POOL          = IAaveV3Pool(aavePool);
+        A_TOKEN            = IERC20(aToken);
+        MORPHO_VAULT       = IMorphoVault(morphoVault);
+        ORACLE             = IDivigentYieldOracle(oracle);
+        FEE_COLLECTOR      = DivigentFeeCollector(feeCollector);
+        DV_USDC            = DvUSDC(dvUsdc);
+        EMERGENCY_MULTISIG = emergencyMultisig;
+        DEPLOYMENT_TIME    = block.timestamp;
+
+        // Pre-approve Aave and Morpho to spend USDC held transiently in this contract.
+        // These approvals are max so repeated deposits don't incur extra approve txs.
+        IERC20(usdc).forceApprove(aavePool,    type(uint256).max);
+        IERC20(usdc).forceApprove(morphoVault, type(uint256).max);
+
+        // Pre-approve FeeCollector to pull fee USDC from this contract during withdrawals.
+        IERC20(usdc).forceApprove(feeCollector, type(uint256).max);
+    }
+
+    // ── Modifiers ─────────────────────────────────────────────────────────────
+
+    /// @dev Requires that `wallet` is registered AND msg.sender is `wallet` or an operator.
+    modifier onlyWalletOrOperator(address wallet) {
+        if (!authorizedWallets[wallet]) revert NotAuthorised();
+        if (msg.sender != wallet && !isOperator[wallet][msg.sender]) revert NotAuthorised();
+        _;
+    }
+
+    modifier whenDepositsNotPaused() {
+        if (depositsPaused) revert DepositsPausedError();
+        _;
+    }
+
+    modifier onlyEmergencyMultisig() {
+        if (msg.sender != EMERGENCY_MULTISIG) revert NotEmergencyMultisig();
+        _;
+    }
+
+    // ── Authorisation ─────────────────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev Self-registration only: msg.sender is the wallet being registered.
+    ///      This prevents a third party from registering an arbitrary wallet address.
+    function initialize() external override {
+        if (authorizedWallets[msg.sender]) revert WalletAlreadyAuthorised();
+        authorizedWallets[msg.sender] = true;
+        emit WalletAuthorised(msg.sender);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev EIP-712 signed authorisation — enables gasless onboarding where a relayer
+    ///      submits the transaction but the wallet proves consent via signature.
+    ///      The signer must be `wallet` itself; no delegation of signing authority.
+    ///
+    ///      Replay protection layers:
+    ///        1. Per-wallet nonce: consumed on first use, making the exact same signature
+    ///           invalid for any subsequent call — even before deadline expiry.
+    ///        2. Deadline: signature becomes invalid after the specified timestamp.
+    ///        3. WalletAlreadyAuthorised(): duplicate registrations revert.
+    ///
+    ///      The nonce is incremented BEFORE the state write so that any reentrancy
+    ///      attempting to replay the same signature would see a different nonce and fail.
+    function initializeFor(
+        address wallet,
+        uint256 deadline,
+        bytes calldata sig
+    ) external override {
+        if (block.timestamp > deadline) revert PermitExpired();
+        if (authorizedWallets[wallet])  revert WalletAlreadyAuthorised();
+
+        // Consume the nonce before verifying — prevents replay even if the subsequent
+        // state write is somehow skipped (defense-in-depth).
+        uint256 currentNonce = nonces[wallet]++;
+
+        bytes32 structHash = keccak256(abi.encode(
+            INITIALIZE_FOR_TYPEHASH,
+            wallet,
+            deadline,
+            currentNonce
+        ));
+        address signer = ECDSA.recover(_hashTypedDataV4(structHash), sig);
+        if (signer != wallet) revert InvalidSignature();
+
+        authorizedWallets[wallet] = true;
+        emit WalletAuthorised(wallet);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function setOperator(address operator, bool approved) external override {
+        isOperator[msg.sender][operator] = approved;
+        emit OperatorSet(msg.sender, operator, approved);
+    }
+
+    // ── Core: Deposit ─────────────────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    function deposit(uint256 amount, address wallet)
+        external
+        override
+        nonReentrant
+        whenDepositsNotPaused
+        onlyWalletOrOperator(wallet)
+        returns (uint256 dvUsdcMinted)
+    {
+        dvUsdcMinted = _deposit(amount, wallet);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev Uses USDC's EIP-2612 permit so no separate approve() tx is needed.
+    ///      The permit signature is validated by the USDC contract — if invalid,
+    ///      the USDC.permit() call reverts before any state change occurs here.
+    function depositWithPermit(
+        uint256 amount,
+        address wallet,
+        uint256 deadline,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    )
+        external
+        override
+        nonReentrant
+        whenDepositsNotPaused
+        onlyWalletOrOperator(wallet)
+        returns (uint256 dvUsdcMinted)
+    {
+        if (block.timestamp > deadline) revert PermitExpired();
+
+        // Execute permit: grants this contract allowance from `wallet` for `amount` USDC.
+        // Reverts if signature is invalid, expired, or already used.
+        IERC20Permit(address(USDC)).permit(
+            wallet, address(this), amount, deadline, v, r, s
+        );
+
+        dvUsdcMinted = _deposit(amount, wallet);
+    }
+
+    // ── Core: Withdraw ────────────────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev CEI pattern: all state mutations (costBasis update, dvUSDC burn) happen
+    ///      BEFORE external calls (vault redemption, USDC transfer to wallet).
+    ///      ReentrancyGuard provides a second line of defence.
+    ///
+    ///      Fee is computed from actualGross = USDC.balanceOf(this) after vault
+    ///      redemptions — not from a pre-estimated grossUSDC. This ensures:
+    ///        (a) Any Morpho rounding (exact-asset withdraw returns slightly less)
+    ///            is absorbed before fee calculation.
+    ///        (b) [INV-2] The fee is always computed on true realised yield, never
+    ///            on principal. If actualGross <= principalOut, fee is exactly 0.
+    function withdraw(
+        uint256 shares,
+        address wallet,
+        uint256 minUsdcOut
+    )
+        external
+        override
+        nonReentrant
+        onlyWalletOrOperator(wallet)
+        returns (uint256 usdcReturned)
+    {
+        if (shares == 0) revert ZeroAmount();
+
+        uint256 walletShares = DV_USDC.balanceOf(wallet);
+        if (shares > walletShares) revert InsufficientShares(shares, walletShares);
+
+        // ── Step 1: Compute principal attribution (read-only) ─────────────────
+        // Attribute principal: proportional share of this wallet's cost basis.
+        // fraction = shares / walletShares  =>  principalOut = costBasis * shares / walletShares
+        uint256 principalOut = (costBasisUSDC[wallet] * shares) / walletShares;
+
+        // ── Step 2: State mutations (before external calls — CEI) ────────────
+        costBasisUSDC[wallet] -= principalOut;
+
+        // Burn dvUSDC from wallet. Because dvUSDC is non-transferable, the wallet
+        // is always the holder — VaultRouter burns directly without needing an allowance.
+        DV_USDC.burn(wallet, shares);
+
+        // ── Step 3: Redeem from vaults (exact-asset semantics) ────────────────
+        // Determine how much USDC to pull from each vault proportionally.
+        uint256 aaveBalance   = A_TOKEN.balanceOf(address(this));
+        uint256 morphoBalance = _morphoAssetsHeld();
+        uint256 totalHeld     = aaveBalance + morphoBalance;
+
+        if (totalHeld == 0) revert ZeroAmount(); // should never happen post-invariant-check
+
+        // grossUSDC is the estimated withdrawal target (used for proportional split).
+        // The actual received amount (actualGross) is measured after redemptions.
+        uint256 totalAssets_  = aaveBalance + morphoBalance; // == totalHeld
+        uint256 totalSupply_  = DV_USDC.totalSupply() + shares; // restore pre-burn supply
+        uint256 grossUSDC     = _sharesToAssets(shares, totalAssets_, totalSupply_);
+
+        uint256 fromAave   = 0;
+        uint256 fromMorpho = 0;
+
+        if (aaveBalance > 0 && morphoBalance == 0) {
+            fromAave = grossUSDC;
+        } else if (morphoBalance > 0 && aaveBalance == 0) {
+            fromMorpho = grossUSDC;
+        } else {
+            // Split proportionally between vaults
+            fromAave   = (grossUSDC * aaveBalance)   / totalHeld;
+            fromMorpho = grossUSDC - fromAave;         // remainder to Morpho
+        }
+
+        // Redeem from Aave (exact USDC amount)
+        if (fromAave > 0) {
+            // Withdraw exactly fromAave USDC from Aave; USDC arrives in this contract
+            AAVE_POOL.withdraw(address(USDC), fromAave, address(this));
+        }
+
+        // Redeem from Morpho (exact-asset semantics via ERC-4626 withdraw)
+        // Using withdraw(assets, receiver, owner) instead of convertToShares + redeem:
+        //   - Eliminates share-rounding risk: convertToShares rounds down, causing the
+        //     redeemed USDC to be slightly less than requested (dust left in vault).
+        //   - ERC-4626 withdraw() burns however many shares are needed to deliver
+        //     exactly `fromMorpho` USDC to the receiver, or reverts if insufficient.
+        if (fromMorpho > 0) {
+            MORPHO_VAULT.withdraw(fromMorpho, address(this), address(this));
+        }
+
+        // ── Step 4: Compute fee from actual received USDC ─────────────────────
+        // [INV-4] At this point: USDC.balanceOf(this) == actualGross (from vault redemptions)
+        // Measure what actually arrived — Morpho may deliver slightly more or less than
+        // requested due to interest accrual between the split calculation and redemption.
+        uint256 actualGross  = USDC.balanceOf(address(this));
+
+        // Recompute yield from actual gross; floor at 0 — principal is never negative yield
+        uint256 actualYield  = actualGross > principalOut ? actualGross - principalOut : 0;
+        uint256 feeAmount    = FEE_COLLECTOR.calculateFee(actualYield);
+        usdcReturned         = actualGross - feeAmount;
+
+        if (usdcReturned < minUsdcOut) {
+            revert SlippageExceeded(usdcReturned, minUsdcOut);
+        }
+
+        // ── Step 5: Collect fee and transfer net proceeds ─────────────────────
+        if (feeAmount > 0) {
+            // FeeCollector pulls feeAmount directly from this contract to TREASURY
+            // (pre-approved in constructor)
+            FEE_COLLECTOR.collectFee(wallet, actualYield);
+        }
+
+        // Transfer net USDC to wallet
+        // [INV-4] After this: USDC.balanceOf(this) == 0
+        USDC.safeTransfer(wallet, usdcReturned);
+
+        emit Withdrawn(wallet, shares, usdcReturned, actualYield, feeAmount);
+    }
+
+    // ── View: Position & State ─────────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @notice Returns the total USDC value managed across all vaults.
+    ///         Aave: aToken balance is 1:1 with USDC (aTokens rebase to reflect yield).
+    ///         Morpho: convert vault shares to USDC using the current exchange rate.
+    function totalVaultAssets() public view override returns (uint256) {
+        return A_TOKEN.balanceOf(address(this)) + _morphoAssetsHeld();
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @notice Current dvUSDC price in USDC, scaled by 1e18.
+    ///         Starts at 1e18 (1 USDC per dvUSDC) and rises monotonically.
+    function pricePerShare() external view override returns (uint256) {
+        uint256 supply = DV_USDC.totalSupply();
+        if (supply == 0) return 1e18;
+        return (totalVaultAssets() * 1e18) / supply;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function currentTVLCap() public view override returns (uint256) {
+        uint256 elapsed = block.timestamp - DEPLOYMENT_TIME;
+        if (elapsed >= DAY_91_OFFSET) return TVL_CAP_REMOVED;
+        if (elapsed >= DAY_31_OFFSET) return TVL_CAP_DAY_31;
+        return TVL_CAP_INITIAL;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function getPosition(address wallet)
+        external
+        view
+        override
+        returns (
+            uint256 depositedUSDC,
+            uint256 currentValue,
+            uint256 accruedYield
+        )
+    {
+        depositedUSDC = costBasisUSDC[wallet];
+
+        uint256 walletShares = DV_USDC.balanceOf(wallet);
+        uint256 totalSupply_ = DV_USDC.totalSupply();
+
+        if (walletShares == 0 || totalSupply_ == 0) {
+            return (depositedUSDC, 0, 0);
+        }
+
+        currentValue = _sharesToAssets(walletShares, totalVaultAssets(), totalSupply_);
+        accruedYield = currentValue > depositedUSDC ? currentValue - depositedUSDC : 0;
+    }
+
+    // ── View: Preview & Simulation ─────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    function previewDeposit(uint256 assets) external view override returns (uint256 dvUsdcOut) {
+        dvUsdcOut = _assetsToShares(assets, totalVaultAssets(), DV_USDC.totalSupply());
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function previewRedeem(uint256 dvUsdcShares, address wallet)
+        external
+        view
+        override
+        returns (uint256 usdcOut)
+    {
+        uint256 totalAssets_ = totalVaultAssets();
+        uint256 totalSupply_ = DV_USDC.totalSupply();
+        uint256 gross        = _sharesToAssets(dvUsdcShares, totalAssets_, totalSupply_);
+
+        uint256 walletShares = DV_USDC.balanceOf(wallet);
+        uint256 principalOut = walletShares > 0
+            ? (costBasisUSDC[wallet] * dvUsdcShares) / walletShares
+            : 0;
+
+        uint256 yield    = gross > principalOut ? gross - principalOut : 0;
+        uint256 fee      = FEE_COLLECTOR.calculateFee(yield);
+        usdcOut          = gross - fee;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev Algebraic derivation (assuming gross > principalOut, i.e. there is yield):
+    ///        net = gross * (1 - feeBps/bpsDenominator) + principalOut * (feeBps/bpsDenominator)
+    ///        where gross = s * (A+1) / (S+1), principalOut = costBasis * s / walletShares
+    ///      Solving for s:
+    ///        s = desiredNet * bpsDenominator * walletShares * (S+1)
+    ///            / [ (bpsDenominator - feeBps) * walletShares * (A+1)
+    ///                + feeBps * costBasis * (S+1) ]
+    ///      Rounds up to ensure the user receives at least desiredNetUSDC.
+    ///      If the position has no yield (principalOut >= gross), this formula slightly
+    ///      overestimates required shares — a conservative outcome that is acceptable
+    ///      for a preview function. The caller should verify with previewRedeem().
+    function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
+        external
+        view
+        override
+        returns (uint256 dvUsdcShares)
+    {
+        uint256 walletShares = DV_USDC.balanceOf(wallet);
+        if (walletShares == 0) return 0;
+
+        uint256 A1         = totalVaultAssets() + VIRTUAL_OFFSET;
+        uint256 S1         = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
+        uint256 costBasis  = costBasisUSDC[wallet];
+        uint256 feeBps     = FEE_COLLECTOR.FEE_BPS();
+        uint256 bpsDenom   = FEE_COLLECTOR.BPS_DENOMINATOR();
+
+        // numerator   = desiredNet * bpsDenominator * walletShares * S1
+        // denominator = (bpsDenom - feeBps) * walletShares * A1
+        //             + feeBps * costBasis * S1
+        uint256 numerator   = desiredNetUSDC * bpsDenom * walletShares * S1;
+        uint256 denominator = (bpsDenom - feeBps) * walletShares * A1
+                            + feeBps * costBasis * S1;
+
+        if (denominator == 0) return 0;
+
+        // Round up to ensure usdcReturned >= desiredNetUSDC
+        dvUsdcShares = (numerator + denominator - 1) / denominator;
+
+        // Cap at wallet's actual holdings
+        if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function convertToShares(uint256 assets) external view override returns (uint256 shares) {
+        shares = _assetsToShares(assets, totalVaultAssets(), DV_USDC.totalSupply());
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function convertToAssets(uint256 shares) external view override returns (uint256 assets) {
+        assets = _sharesToAssets(shares, totalVaultAssets(), DV_USDC.totalSupply());
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function getCurrentAllocation()
+        external
+        view
+        override
+        returns (uint256 aaveAssets, uint256 morphoAssets)
+    {
+        aaveAssets   = A_TOKEN.balanceOf(address(this));
+        morphoAssets = _morphoAssetsHeld();
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function getRecommendedRoute(uint256 amount)
+        external
+        view
+        override
+        returns (IDivigentYieldOracle.VaultType vaultType)
+    {
+        (, vaultType, ) = ORACLE.getOptimalVault();
+
+        if (_canAllocate(vaultType, amount)) return vaultType;
+
+        IDivigentYieldOracle.VaultType alternate =
+            vaultType == IDivigentYieldOracle.VaultType.AAVE
+                ? IDivigentYieldOracle.VaultType.MORPHO
+                : IDivigentYieldOracle.VaultType.AAVE;
+
+        if (_canAllocate(alternate, amount)) return alternate;
+
+        revert NoSafeRoute(amount);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function oracleStatus()
+        external
+        view
+        override
+        returns (uint256 lastObservationTime_, bool fresh)
+    {
+        lastObservationTime_ = ORACLE.lastObservationTime();
+        fresh                = ORACLE.isFresh();
+    }
+
+    // ── Emergency Controls ────────────────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    function pauseDeposits() external override onlyEmergencyMultisig {
+        depositsPaused = true;
+        emit DepositsPaused(true);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function unpauseDeposits() external override onlyEmergencyMultisig {
+        depositsPaused = false;
+        emit DepositsPaused(false);
+    }
+
+    // ── Internal: Share Maths ─────────────────────────────────────────────────
+
+    /// @dev Calculates dvUSDC shares to mint for a given USDC deposit.
+    ///
+    ///      Formula (ERC-4626 style with virtual offset):
+    ///        shares = amount * (totalSupply + VIRTUAL_OFFSET)
+    ///                        / (totalAssets + VIRTUAL_OFFSET)
+    ///
+    ///      The virtual offset (+1 to both numerator and denominator) prevents the
+    ///      classic first-depositor inflation attack where an attacker mints 1 share,
+    ///      donates a large amount, then makes a victim's deposit round down to 0 shares.
+    ///      With the offset, the minimum share mint is 1 regardless of pool state.
+    ///
+    ///      Rounding: floor (in vault's favour) to prevent share inflation.
+    function _assetsToShares(
+        uint256 assets,
+        uint256 totalAssets_,
+        uint256 totalSupply_
+    ) internal pure returns (uint256 shares) {
+        shares = (assets * (totalSupply_ + VIRTUAL_OFFSET))
+                / (totalAssets_  + VIRTUAL_OFFSET);
+    }
+
+    /// @dev Calculates USDC value of a given number of dvUSDC shares.
+    ///
+    ///      Formula (inverse of _assetsToShares, matching virtual offset):
+    ///        assets = shares * (totalAssets + VIRTUAL_OFFSET)
+    ///                        / (totalSupply + VIRTUAL_OFFSET)
+    ///
+    ///      Rounding: floor (in vault's favour).
+    function _sharesToAssets(
+        uint256 shares,
+        uint256 totalAssets_,
+        uint256 totalSupply_
+    ) internal pure returns (uint256 assets) {
+        assets = (shares * (totalAssets_ + VIRTUAL_OFFSET))
+               / (totalSupply_ + VIRTUAL_OFFSET);
+    }
+
+    // ── Internal: Amount-Aware Vault Capacity ─────────────────────────────────
+
+    /// @dev Returns true if `vaultType` appears to have sufficient capacity for `amount`.
+    ///
+    ///      Aave: reads USDC.balanceOf(aToken) — the idle USDC cash currently sitting
+    ///            in the aToken contract — and checks whether it meets or exceeds `amount`.
+    ///            IMPORTANT: this is a balance-based heuristic, not a protocol-native
+    ///            deposit-capacity guarantee from Aave. It captures whether the pool has
+    ///            enough current liquidity to be considered viable, but does not represent
+    ///            a commitment about future withdrawal liquidity, nor does it use any
+    ///            Aave-provided "maxDeposit"-style function. Treat it as a conservative
+    ///            same-block liquidity proxy, not an exact capacity bound.
+    ///
+    ///      Morpho: uses the ERC-4626 standard maxDeposit(receiver). This is a
+    ///              protocol-native function that returns the maximum USDC the vault will
+    ///              accept in a single deposit, respecting supply caps and pause state.
+    ///              It is a stronger guarantee than the Aave heuristic.
+    ///
+    ///      Both checks complement — not replace — the oracle's isVaultSafe() advisory.
+    ///      The oracle provides rate-based routing signals; _canAllocate() provides a
+    ///      same-block capacity proxy for the specific deposit amount.
+    function _canAllocate(
+        IDivigentYieldOracle.VaultType vaultType,
+        uint256 amount
+    ) internal view returns (bool) {
+        if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
+            return USDC.balanceOf(address(A_TOKEN)) >= amount;
+        } else {
+            return MORPHO_VAULT.maxDeposit(address(this)) >= amount;
+        }
+    }
+
+    // ── Internal: Deposit Logic ───────────────────────────────────────────────
+
+    /// @dev Shared implementation for deposit() and depositWithPermit().
+    ///
+    ///      Flow (atomically, within one transaction):
+    ///        1. Validate amount and TVL cap.
+    ///        2. Pull USDC from wallet into this contract (transient custody).
+    ///        3. Trigger oracle update (permissionless, skipped if too recent).
+    ///        4. Verify oracle is fresh (reverts StaleOracle if > 2 hours stale).
+    ///        5. Query oracle for optimal vault.
+    ///        6. Check amount-aware vault capacity (_canAllocate); try alternate if needed.
+    ///           Reverts NoSafeRoute(amount) if both vaults lack capacity.
+    ///        7. Supply USDC to the selected vault.
+    ///        8. Mint dvUSDC shares to wallet.
+    ///        9. Update cost basis.
+    ///
+    ///      [INV-4]: USDC arrives in this contract at step 2, departs at step 7.
+    ///               After step 7, USDC.balanceOf(address(this)) == 0.
+    function _deposit(uint256 amount, address wallet)
+        internal
+        returns (uint256 dvUsdcMinted)
+    {
+        if (amount < MIN_DEPOSIT) revert InvalidAmount();
+
+        // TVL cap check
+        uint256 newTVL = totalVaultAssets() + amount;
+        uint256 cap    = currentTVLCap();
+        if (newTVL > cap) revert TVLCapExceeded(amount, cap);
+
+        // Snapshot state BEFORE pulling USDC (pre-deposit assets and supply)
+        uint256 totalAssetsBefore = totalVaultAssets();
+        uint256 totalSupplyBefore = DV_USDC.totalSupply();
+
+        // Pull USDC from wallet → this contract (transient)
+        // [INV-4]: USDC.balanceOf(this) == amount here
+        USDC.safeTransferFrom(wallet, address(this), amount);
+
+        // Nudge the oracle to record a fresh observation (no-op if too recent)
+        try ORACLE.recordObservation() {} catch {}
+
+        // Verify oracle freshness — reject deposit if rates are potentially stale
+        if (!ORACLE.isFresh()) revert StaleOracle();
+
+        // Determine oracle-recommended vault (AAVE or MORPHO)
+        (
+            ,
+            IDivigentYieldOracle.VaultType vaultType,
+
+        ) = ORACLE.getOptimalVault();
+
+        // Amount-aware capacity check: if the primary vault can't accommodate `amount`,
+        // fall back to the alternate vault; if neither can, revert NoSafeRoute.
+        if (!_canAllocate(vaultType, amount)) {
+            IDivigentYieldOracle.VaultType alternate =
+                vaultType == IDivigentYieldOracle.VaultType.AAVE
+                    ? IDivigentYieldOracle.VaultType.MORPHO
+                    : IDivigentYieldOracle.VaultType.AAVE;
+
+            if (!_canAllocate(alternate, amount)) {
+                revert NoSafeRoute(amount);
+            }
+            vaultType = alternate;
+        }
+
+        // Route USDC to the selected vault
+        // [INV-4]: After supply call, USDC.balanceOf(this) == 0
+        if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
+            // USDC is already approved to Aave in constructor
+            AAVE_POOL.supply(address(USDC), amount, address(this), 0);
+        } else {
+            // USDC is already approved to Morpho in constructor
+            MORPHO_VAULT.deposit(amount, address(this));
+        }
+
+        // Mint dvUSDC shares using pre-deposit snapshot (avoids share dilution from
+        // the just-deposited amount appearing in totalVaultAssets())
+        dvUsdcMinted = _assetsToShares(amount, totalAssetsBefore, totalSupplyBefore);
+
+        if (dvUsdcMinted == 0) revert ZeroAmount();
+
+        DV_USDC.mint(wallet, dvUsdcMinted);
+
+        // Update principal cost basis
+        costBasisUSDC[wallet] += amount;
+
+        emit Deposited(wallet, amount, dvUsdcMinted, vaultType);
+    }
+
+    // ── Internal: Morpho Balance ──────────────────────────────────────────────
+
+    /// @dev Returns the USDC value of Morpho shares held by this contract.
+    ///      Uses the vault's convertToAssets() which accounts for accrued yield.
+    function _morphoAssetsHeld() internal view returns (uint256) {
+        uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
+        if (morphoShares == 0) return 0;
+        return MORPHO_VAULT.convertToAssets(morphoShares);
+    }
+}

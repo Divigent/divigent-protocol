@@ -1,0 +1,19 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
+[profile.default.fuzz]
+runs = 10000
+max_test_rejects = 65536
+
+[profile.ci]
+fuzz = { runs = 50000 }
+
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+]

@@ -1,0 +1,35 @@
+########################
+# macOS
+########################
+.DS_Store
+**/.DS_Store
+
+########################
+# IntelliJ IDEA
+########################
+.idea/
+*.iml
+
+########################
+# Foundry / Solidity build
+########################
+# Top-level Foundry artifacts
+foundry.lock
+cache/
+out/
+# Foundry dependencies
+lib/
+
+# ./contracts
+contracts/foundry.lock
+contracts/cache/
+contracts/out/
+# Vendored deps inside contracts/
+contracts/lib/
+
+########################
+# Misc
+########################
+# Node / JS (if you add a frontend later)
+node_modules/
+dist/

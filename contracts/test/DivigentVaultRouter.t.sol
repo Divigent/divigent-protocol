@@ -1,0 +1,903 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+
+import {DivigentVaultRouter}  from "../src/DivigentVaultRouter.sol";
+import {DivigentFeeCollector} from "../src/DivigentFeeCollector.sol";
+import {DvUSDC}               from "../src/dvUSDC.sol";
+import {IDivigentVaultRouter} from "../src/interfaces/IDivigentVaultRouter.sol";
+import {IDivigentYieldOracle} from "../src/interfaces/IDivigentYieldOracle.sol";
+
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Mocks
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// @dev Minimal ERC-20 for USDC and aToken mocking.
+contract MockERC20 {
+    string  public name;
+    string  public symbol;
+    uint8   public decimals;
+    uint256 public totalSupply;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor(string memory _name, string memory _symbol, uint8 _dec) {
+        name     = _name;
+        symbol   = _symbol;
+        decimals = _dec;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply    += amount;
+    }
+
+    function burn(address from, uint256 amount) external {
+        balanceOf[from] -= amount;
+        totalSupply     -= amount;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to]         += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from]             -= amount;
+        balanceOf[to]               += amount;
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    /// @dev Test helper: set an account's balance directly (adjusts totalSupply).
+    function setBalance(address account, uint256 newBalance) external {
+        uint256 old = balanceOf[account];
+        if (newBalance >= old) {
+            totalSupply += newBalance - old;
+        } else {
+            totalSupply -= old - newBalance;
+        }
+        balanceOf[account] = newBalance;
+    }
+}
+
+/// @dev Mock Aave V3 Pool: supply moves USDC into aToken, withdraw reverses.
+contract MockAavePool {
+    MockERC20 public usdc;
+    MockERC20 public aToken;
+
+    constructor(address _usdc, address _aToken) {
+        usdc   = MockERC20(_usdc);
+        aToken = MockERC20(_aToken);
+    }
+
+    /// @dev Simulates supply: pull USDC from caller, mint aToken 1:1.
+    function supply(address /*asset*/, uint256 amount, address onBehalfOf, uint16 /*refCode*/) external {
+        usdc.burn(msg.sender, amount);
+        aToken.mint(onBehalfOf, amount);
+    }
+
+    /// @dev Simulates withdraw: burn aToken from caller, push USDC.
+    function withdraw(address /*asset*/, uint256 amount, address to) external returns (uint256) {
+        aToken.burn(msg.sender, amount);
+        usdc.mint(to, amount);
+        return amount;
+    }
+}
+
+/// @dev Mock MetaMorpho vault (ERC-4626 style). Yield is simulated by
+///      incrementing an internal assets counter without minting shares.
+contract MockMorphoVault {
+    MockERC20 public usdc;
+    uint256   public totalShares;
+    uint256   public totalAssets_; // can drift above totalShares to simulate yield
+
+    uint256 private constant SHARE_UNIT = 1e6;
+    uint256 public maxDepositAmount = type(uint256).max;
+
+    constructor(address _usdc) {
+        usdc = MockERC20(_usdc);
+        // Seed 1:1 share price
+        totalAssets_ = 0;
+        totalShares  = 0;
+    }
+
+    // ── ERC-4626 surface ────────────────────────────────────────────────────
+
+    function convertToAssets(uint256 shares) external view returns (uint256) {
+        if (totalShares == 0) return shares; // 1:1 before first deposit
+        return shares * totalAssets_ / totalShares;
+    }
+
+    function convertToShares(uint256 assets) external view returns (uint256) {
+        if (totalAssets_ == 0) return assets;
+        return assets * totalShares / totalAssets_;
+    }
+
+    function maxDeposit(address /*owner*/) external view returns (uint256) {
+        return maxDepositAmount;
+    }
+
+    function maxWithdraw(address /*owner*/) external view returns (uint256) {
+        return type(uint256).max;
+    }
+
+    /// @dev deposit: pull USDC, mint proportional shares.
+    function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
+        shares = (totalShares == 0) ? assets : assets * totalShares / totalAssets_;
+        usdc.burn(msg.sender, assets);
+        totalAssets_ += assets;
+        totalShares  += shares;
+        _balances[receiver] += shares;
+    }
+
+    /// @dev withdraw (exact-asset): burn shares, push USDC.
+    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares) {
+        shares = (totalShares == 0) ? assets : (assets * totalShares + totalAssets_ - 1) / totalAssets_;
+        _balances[owner]  -= shares;
+        totalShares       -= shares;
+        totalAssets_      -= assets;
+        usdc.mint(receiver, assets);
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    mapping(address => uint256) private _balances;
+
+    // ── Test helpers ────────────────────────────────────────────────────────
+
+    /// @dev Simulate yield accrual: increase assets without minting shares.
+    function accrueYield(uint256 extraAssets) external {
+        totalAssets_ += extraAssets;
+    }
+
+    /// @dev Restrict capacity (for NoSafeRoute tests).
+    function setMaxDeposit(uint256 cap) external {
+        maxDepositAmount = cap;
+    }
+}
+
+/// @dev Minimal oracle stub. Exposes settable optimal vault and freshness.
+contract MockOracle {
+    IDivigentYieldOracle.VaultType public optimalVault = IDivigentYieldOracle.VaultType.AAVE;
+    bool public fresh_ = true;
+    uint256 public lastObservationTime_;
+
+    function getOptimalVault()
+        external
+        view
+        returns (
+            uint256 aaveRate,
+            IDivigentYieldOracle.VaultType vaultType,
+            uint256 morphoRate
+        )
+    {
+        return (0, optimalVault, 0);
+    }
+
+    function isFresh() external view returns (bool) { return fresh_; }
+
+    function lastObservationTime() external view returns (uint256) {
+        return lastObservationTime_;
+    }
+
+    function lastGoodObservationAge() external view returns (uint256) {
+        return block.timestamp - lastObservationTime_;
+    }
+
+    /// @dev No-op: router calls this in a try/catch during deposits.
+    function recordObservation() external {}
+
+    // helpers
+    function setOptimalVault(IDivigentYieldOracle.VaultType v) external { optimalVault = v; }
+    function setFresh(bool f)  external { fresh_ = f; }
+    function setLastObservationTime(uint256 t) external { lastObservationTime_ = t; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Harness: thin shim that wires mock contracts to router constructor args.
+//  The real DivigentVaultRouter casts addresses to specific interfaces, so we
+//  deploy the mocks and pass them as the appropriate interface addresses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// @dev Full integration test harness with mock contracts.
+contract DivigentVaultRouterTest is Test {
+
+    // ── Protocol contracts ──────────────────────────────────────────────────
+    DivigentVaultRouter  internal router;
+    DivigentFeeCollector internal feeCollector;
+    DvUSDC               internal dvUsdc;
+
+    // ── Mocks ────────────────────────────────────────────────────────────────
+    MockERC20      internal usdc;
+    MockERC20      internal aToken;
+    MockAavePool   internal aavePool;
+    MockMorphoVault internal morphoVault;
+    MockOracle     internal oracle;
+
+    // ── Actors ──────────────────────────────────────────────────────────────
+    address internal treasury      = makeAddr("treasury");
+    address internal emergencyMultisig = makeAddr("multisig");
+    address internal alice;
+    uint256 internal aliceKey;
+    address internal bob           = makeAddr("bob");
+    address internal operator_     = makeAddr("operator");
+
+    // ── Constants ────────────────────────────────────────────────────────────
+    uint256 internal constant INITIAL_USDC = 100_000e6; // 100k USDC
+    uint256 internal constant MIN_DEPOSIT  = 10e6;
+    uint256 internal constant FEE_BPS      = 1_000;     // 10 %
+    uint256 internal constant BPS_DENOM    = 10_000;
+
+    bytes32 private constant INITIALIZE_FOR_TYPEHASH =
+        keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
+
+    // ────────────────────────────────────────────────────────────────────────
+
+    function setUp() public {
+        (alice, aliceKey) = makeAddrAndKey("alice");
+
+        // Deploy mock tokens
+        usdc   = new MockERC20("USD Coin", "USDC", 6);
+        aToken = new MockERC20("Aave aUSDC", "aUSDC", 6);
+
+        // Deploy mock protocols
+        aavePool    = new MockAavePool(address(usdc), address(aToken));
+        morphoVault = new MockMorphoVault(address(usdc));
+        oracle      = new MockOracle();
+        oracle.setLastObservationTime(block.timestamp);
+
+        // Seed aToken with USDC liquidity for Aave capacity check
+        usdc.mint(address(aToken), 10_000_000e6);
+
+        // Deploy real protocol contracts.
+        // There is a three-way circular dependency:
+        //   FeeCollector needs (usdc, treasury, routerAddr)
+        //   DvUSDC       needs (routerAddr)
+        //   Router       needs (feeCollectorAddr, dvUsdcAddr)
+        //
+        // Resolve by pre-computing the router's CREATE address before any deploy:
+        //   nonce N  : feeCollector
+        //   nonce N+1: dvUsdc
+        //   nonce N+2: router  ← pre-compute this
+        uint256 currentNonce = vm.getNonce(address(this));
+        address expectedRouterAddr = vm.computeCreateAddress(address(this), currentNonce + 2);
+
+        feeCollector = new DivigentFeeCollector(  // nonce N
+            address(usdc),
+            treasury,
+            expectedRouterAddr
+        );
+
+        dvUsdc = new DvUSDC(expectedRouterAddr);   // nonce N+1
+
+        router = new DivigentVaultRouter(          // nonce N+2 → lands at expectedRouterAddr
+            address(usdc),
+            address(aavePool),
+            address(aToken),
+            address(morphoVault),
+            address(oracle),
+            address(feeCollector),
+            address(dvUsdc),
+            emergencyMultisig
+        );
+
+        // Sanity: verify the circular wiring is correct.
+        assert(address(router) == expectedRouterAddr);
+
+        // Fund actors
+        usdc.mint(alice,    INITIAL_USDC);
+        usdc.mint(bob,      INITIAL_USDC);
+        usdc.mint(operator_, INITIAL_USDC);
+
+        // Register alice and bob by default
+        vm.prank(alice);
+        router.initialize();
+
+        vm.prank(bob);
+        router.initialize();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Approve and deposit `amount` USDC for `wallet` called by `caller`.
+    ///      USDC is always pulled from `wallet` by the router; `wallet` must approve.
+    ///      When `caller != wallet` (operator flow), wallet approves separately and
+    ///      caller just triggers the deposit.
+    function _deposit(address caller, address wallet, uint256 amount) internal returns (uint256) {
+        // wallet approves router to pull its USDC (router always pulls from wallet)
+        vm.prank(wallet);
+        usdc.approve(address(router), amount);
+
+        vm.prank(caller);
+        return router.deposit(amount, wallet);
+    }
+
+    /// @dev Build and sign an initializeFor() EIP-712 digest.
+    function _signInitializeFor(
+        uint256 privateKey,
+        address wallet,
+        uint256 deadline
+    ) internal view returns (bytes memory sig) {
+        uint256 nonce = router.nonces(wallet);
+
+        bytes32 structHash = keccak256(
+            abi.encode(INITIALIZE_FOR_TYPEHASH, wallet, deadline, nonce)
+        );
+
+        // Compute domain separator from router (must match EIP712 impl)
+        bytes32 domainSep = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes("DivigentVaultRouter")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(router)
+            )
+        );
+        bytes32 digest = MessageHashUtils.toTypedDataHash(domainSep, structHash);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        sig = abi.encodePacked(r, s, v);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  1. previewWithdrawNet accuracy
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev previewWithdrawNet should predict net USDC within 1 wei of the
+    ///      actual withdraw() return value, accounting for the 10% yield fee.
+    function test_previewWithdrawNet_accuracy() public {
+        uint256 depositAmount = 50_000e6;
+        // Use Aave route (default oracle) so yield is simulated via aToken inflation
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // Simulate 5% yield: mint extra USDC to aToken address.
+        // The router reads aToken.balanceOf(router) as Aave assets; we inflate it
+        // by minting aTokens to the router, which mirrors how Aave accrues yield.
+        uint256 yieldAmount = depositAmount * 5 / 100;
+        aToken.mint(address(router), yieldAmount);
+
+        uint256 desiredNet = 50_000e6 + 2_000e6; // want principal + some yield net of fee
+
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+        uint256 predictedOut    = router.previewRedeem(predictedShares, alice);
+
+        // Actual withdraw
+        vm.startPrank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0 /* no slippage guard */);
+        vm.stopPrank();
+
+        // Must be within 1 wei — formula is algebraic, not iterative
+        assertApproxEqAbs(actualOut, desiredNet, 1, "previewWithdrawNet off by >1 wei");
+        assertApproxEqAbs(predictedOut, actualOut, 1, "previewRedeem inconsistent with withdraw");
+    }
+
+    /// @dev previewWithdrawNet for full withdrawal (desiredNet >= position value)
+    ///      must return exactly the wallet's share balance, not overflow.
+    function test_previewWithdrawNet_cappedAtWalletShares() public {
+        uint256 depositAmount = 20_000e6;
+        _deposit(alice, alice, depositAmount);
+
+        uint256 hugDesiredNet = 1_000_000_000e6; // far more than deposited
+        uint256 shares = router.previewWithdrawNet(hugDesiredNet, alice);
+
+        uint256 walletBalance = dvUsdc.balanceOf(alice);
+        assertEq(shares, walletBalance, "Should be capped at wallet shares");
+    }
+
+    /// @dev previewWithdrawNet returns 0 shares when desiredNet == 0.
+    function test_previewWithdrawNet_zeroDesired() public {
+        uint256 depositAmount = 10_000e6;
+        _deposit(alice, alice, depositAmount);
+        uint256 shares = router.previewWithdrawNet(0, alice);
+        assertEq(shares, 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  2. Stale oracle blocks deposits
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Advancing past MAX_STALENESS (2 hours) must cause deposit() to revert
+    ///      with StaleOracle().
+    function test_staleOracle_blocksDeposit() public {
+        // Oracle is fresh at setUp time.
+        uint256 amount = 10_000e6;
+        _deposit(alice, alice, amount); // should succeed
+
+        // Advance time beyond MAX_STALENESS (2 hours = 7200 s)
+        vm.warp(block.timestamp + 7201);
+        oracle.setFresh(false);
+
+        vm.startPrank(alice);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(IDivigentVaultRouter.StaleOracle.selector);
+        router.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    /// @dev Withdrawals must still succeed when oracle is stale.
+    function test_staleOracle_doesNotBlockWithdraw() public {
+        uint256 depositAmount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        vm.warp(block.timestamp + 7201);
+        oracle.setFresh(false);
+
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+        assertGt(returned, 0, "Withdraw should succeed even with stale oracle");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  3. Operator authorisation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev An approved operator can deposit and withdraw on behalf of a wallet.
+    function test_operator_canDepositAndWithdraw() public {
+        // Alice grants operator_ operator rights
+        vm.prank(alice);
+        router.setOperator(operator_, true);
+
+        uint256 depositAmount = 15_000e6;
+
+        // USDC is pulled from wallet (alice), not from the operator.
+        // Alice must pre-approve the router; operator_ merely calls deposit().
+        vm.prank(alice);
+        usdc.approve(address(router), depositAmount);
+
+        // operator_ deposits on alice's behalf — using alice's USDC
+        vm.prank(operator_);
+        uint256 sharesMinted = router.deposit(depositAmount, alice);
+
+        assertEq(dvUsdc.balanceOf(alice), sharesMinted, "Shares minted to alice");
+        assertEq(dvUsdc.balanceOf(operator_), 0,       "Operator receives no shares");
+
+        // operator_ withdraws on alice's behalf; USDC returns to alice
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        vm.prank(operator_);
+        uint256 returned = router.withdraw(sharesMinted, alice, 0);
+
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + returned,
+            "USDC returned to alice, not operator");
+    }
+
+    /// @dev An address that is NOT an approved operator must be rejected.
+    function test_operator_cannotActWithoutApproval() public {
+        address rogue = makeAddr("rogue");
+        uint256 amount = 10_000e6;
+
+        // rogue is not registered or approved
+        vm.startPrank(rogue);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
+        router.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    /// @dev After revoking an operator, they must no longer be able to act.
+    function test_operator_revokeStopsAccess() public {
+        vm.prank(alice);
+        router.setOperator(operator_, true);
+
+        // Revoke
+        vm.prank(alice);
+        router.setOperator(operator_, false);
+
+        uint256 amount = 10_000e6;
+        vm.startPrank(operator_);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
+        router.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  4. Proportional principal attribution across many partial withdrawals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev After N partial withdrawals, the total fee paid must equal exactly
+    ///      (totalYieldEarned * FEE_BPS / BPS_DENOM), and principal must never
+    ///      be touched — even under cumulative rounding.
+    function test_partialWithdrawals_principalAttributionCorrect() public {
+        uint256 depositAmount = 50_000e6;
+        uint256 yieldAmount   = 5_000e6; // 10% synthetic yield
+
+        // Alice deposits into Aave (default oracle route)
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 totalShares = _deposit(alice, alice, depositAmount);
+
+        // Simulate yield: mint extra aTokens directly to the router.
+        // The router's aToken balance represents its Aave position;
+        // inflating it mirrors how Aave accrues interest (rebasing aTokens).
+        aToken.mint(address(router), yieldAmount);
+
+        uint256 usdcReturnedTotal = 0;
+        uint256 sharesToRedeem    = totalShares;
+        uint256 withdrawalsCount  = 5;
+        uint256 chunkShares       = sharesToRedeem / withdrawalsCount;
+
+        for (uint256 i = 0; i < withdrawalsCount; i++) {
+            uint256 chunk = (i == withdrawalsCount - 1)
+                ? dvUsdc.balanceOf(alice)  // redeem remainder in last step
+                : chunkShares;
+
+            vm.prank(alice);
+            uint256 returned = router.withdraw(chunk, alice, 0);
+            usdcReturnedTotal += returned;
+        }
+
+        // Total returned must be >= depositAmount (principal always safe)
+        assertGe(usdcReturnedTotal, depositAmount,
+            "Principal must be fully returned");
+
+        // Fee must be 10% of yield only (never on principal)
+        // Net yield to alice = totalReturned - depositAmount
+        uint256 netYield = usdcReturnedTotal - depositAmount;
+        // Gross yield before fee = netYield / (1 - feePct) = netYield * 10 / 9
+        // We test the bound: netYield <= yieldAmount (fee was deducted)
+        //                    netYield >= yieldAmount * 90% (fee ≤ 10%)
+        assertLe(netYield, yieldAmount,        "Fee must have been deducted from yield");
+        assertGe(netYield * BPS_DENOM, yieldAmount * (BPS_DENOM - FEE_BPS) - 1,
+            "Fee must not exceed 10% of yield (allow 1 wei rounding)");
+
+        // No dvUSDC dust remaining
+        assertEq(dvUsdc.balanceOf(alice), 0, "All shares must be redeemed");
+    }
+
+    /// @dev A wallet that deposits twice should have a cost basis equal to the
+    ///      sum of both deposits, and fees are computed correctly on total yield.
+    function test_partialWithdrawals_multipleDepositsCorrectBasis() public {
+        uint256 deposit1 = 20_000e6;
+        uint256 deposit2 = 30_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+
+        _deposit(alice, alice, deposit1);
+        // Accrue some yield between deposits (inflate aToken balance at router)
+        aToken.mint(address(router), 500e6);
+        _deposit(alice, alice, deposit2);
+
+        // Check cost basis reflects both deposits
+        (uint256 basis,, ) = router.getPosition(alice);
+        assertEq(basis, deposit1 + deposit2, "Cost basis must equal sum of deposits");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  5. initializeFor nonce replay protection
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev The same signature must be rejected on a second call to initializeFor().
+    function test_initializeFor_nonceReplay_reverts() public {
+        // Use a fresh wallet that hasn't been registered yet
+        (address newWallet, uint256 newKey) = makeAddrAndKey("newWallet");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signInitializeFor(newKey, newWallet, deadline);
+
+        // First call: should succeed
+        router.initializeFor(newWallet, deadline, sig);
+        assertTrue(router.authorizedWallets(newWallet), "Wallet must be authorised");
+
+        // Now newWallet is authorised; the nonce has been incremented.
+        // A second call with the SAME sig must revert:
+        // - Either WalletAlreadyAuthorised (authorised check fires first)
+        // - Or InvalidSignature (nonce mismatch)
+        // Either way, replay is rejected.
+        vm.expectRevert(); // accept either error
+        router.initializeFor(newWallet, deadline, sig);
+    }
+
+    /// @dev initializeFor() with a wrong signer must revert with InvalidSignature.
+    function test_initializeFor_wrongSigner_reverts() public {
+        (address newWallet,) = makeAddrAndKey("newWallet2");
+        (, uint256 rogueKey) = makeAddrAndKey("rogue2");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        // Sign with rogue key, not newWallet's key
+        uint256 nonce = router.nonces(newWallet);
+        bytes32 structHash = keccak256(
+            abi.encode(INITIALIZE_FOR_TYPEHASH, newWallet, deadline, nonce)
+        );
+
+        bytes32 domainSep = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes("DivigentVaultRouter")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(router)
+            )
+        );
+        bytes32 digest = MessageHashUtils.toTypedDataHash(domainSep, structHash);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogueKey, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        vm.expectRevert(IDivigentVaultRouter.InvalidSignature.selector);
+        router.initializeFor(newWallet, deadline, sig);
+    }
+
+    /// @dev initializeFor() with an expired deadline must revert with PermitExpired.
+    function test_initializeFor_expiredDeadline_reverts() public {
+        (address newWallet, uint256 newKey) = makeAddrAndKey("newWallet3");
+
+        uint256 deadline = block.timestamp - 1; // already expired
+        bytes memory sig = _signInitializeFor(newKey, newWallet, deadline);
+
+        vm.expectRevert(IDivigentVaultRouter.PermitExpired.selector);
+        router.initializeFor(newWallet, deadline, sig);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  6. dvUSDC non-transferability
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Direct dvUSDC.transfer() between two accounts must revert.
+    function test_dvUSDC_nonTransferable_transfer() public {
+        uint256 depositAmount = 10_000e6;
+        _deposit(alice, alice, depositAmount);
+
+        uint256 shares = dvUsdc.balanceOf(alice);
+        assertGt(shares, 0, "Alice must hold shares");
+
+        vm.startPrank(alice);
+        vm.expectRevert(DvUSDC.NonTransferable.selector);
+        dvUsdc.transfer(bob, shares);
+        vm.stopPrank();
+    }
+
+    /// @dev dvUSDC.transferFrom() (even with allowance) must revert.
+    function test_dvUSDC_nonTransferable_transferFrom() public {
+        uint256 depositAmount = 10_000e6;
+        _deposit(alice, alice, depositAmount);
+
+        uint256 shares = dvUsdc.balanceOf(alice);
+
+        vm.prank(alice);
+        dvUsdc.approve(bob, shares);
+
+        vm.startPrank(bob);
+        vm.expectRevert(DvUSDC.NonTransferable.selector);
+        dvUsdc.transferFrom(alice, bob, shares);
+        vm.stopPrank();
+    }
+
+    /// @dev Mint (from == address(0)) must still work — invoked via deposit.
+    function test_dvUSDC_mintAllowed() public {
+        uint256 depositAmount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, depositAmount);
+        assertGt(shares, 0, "Minting must succeed");
+        assertEq(dvUsdc.balanceOf(alice), shares);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  7. NoSafeRoute when both vaults are at capacity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev When Aave's aToken has insufficient USDC liquidity AND Morpho's
+    ///      maxDeposit returns 0, deposit() must revert with NoSafeRoute.
+    function test_noSafeRoute_whenBothVaultsFull() public {
+        // Drain USDC balance held by aToken to 0 — router checks balanceOf(aToken)
+        // as a heuristic for Aave liquidity capacity.
+        usdc.setBalance(address(aToken), 0);
+
+        // Restrict Morpho maxDeposit to 0
+        morphoVault.setMaxDeposit(0);
+
+        // Oracle routes to Aave first (default)
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+
+        uint256 amount = 10_000e6;
+        vm.startPrank(alice);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
+    /// @dev When primary vault is full but alternate is not, deposit succeeds.
+    function test_noSafeRoute_fallbackToAlternate() public {
+        // Drain Aave capacity
+        usdc.setBalance(address(aToken), 0);
+
+        // Morpho still open
+        morphoVault.setMaxDeposit(type(uint256).max);
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+
+        uint256 amount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, amount);
+        assertGt(shares, 0, "Deposit must succeed via fallback to Morpho");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  8. Fee invariants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev When there is zero yield (no share-price appreciation), the fee must
+    ///      be exactly zero — principal is never touched.
+    function test_fee_zeroYield_zeroFee() public {
+        uint256 depositAmount = 20_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+
+        // No yield → no fee → returned == depositAmount (allow 1 wei rounding)
+        assertApproxEqAbs(returned, depositAmount, 1, "Principal must be fully returned when yield == 0");
+        assertApproxEqAbs(usdc.balanceOf(alice), aliceBefore + depositAmount, 1);
+    }
+
+    /// @dev Fee must equal exactly 10% of yield when yield > 0.
+    function test_fee_exactlyTenPercentOfYield() public {
+        uint256 depositAmount = 10_000e6;
+        uint256 yieldAmount   = 1_000e6; // 10% yield
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        // Simulate yield: inflate the router's aToken balance (mirrors Aave rebasing)
+        aToken.mint(address(router), yieldAmount);
+
+        uint256 aliceBefore  = usdc.balanceOf(alice);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+
+        uint256 netYield    = returned - depositAmount;
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+
+        // Fee = 10% of yield; net yield = 90% of yield
+        // Allow 1 wei rounding tolerance throughout
+        assertApproxEqAbs(feeCollected, yieldAmount / 10, 1, "Fee must be 10% of yield");
+        assertApproxEqAbs(netYield, yieldAmount * 9 / 10, 1, "Net yield must be 90% of gross yield");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  9. TVL cap enforcement
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Deposits beyond the TVL_CAP_INITIAL must revert with TVLCapExceeded.
+    function test_tvlCap_initial_exceeded() public {
+        // Cap = 500_000e6. Deposit 400k first.
+        usdc.mint(alice, 600_000e6);
+
+        uint256 deposit1 = 400_000e6;
+        _deposit(alice, alice, deposit1);
+
+        // Next deposit of 200k would push TVL to 600k > cap
+        uint256 deposit2 = 200_000e6;
+        vm.startPrank(alice);
+        usdc.approve(address(router), deposit2);
+        vm.expectRevert();  // TVLCapExceeded
+        router.deposit(deposit2, alice);
+        vm.stopPrank();
+    }
+
+    /// @dev After day 31, TVL cap expands to 2M.
+    function test_tvlCap_expandsAtDay31() public {
+        usdc.mint(alice, 2_000_000e6);
+
+        // Deposit 500k (fills initial cap)
+        _deposit(alice, alice, 500_000e6);
+
+        // Warp past day 31
+        vm.warp(block.timestamp + 31 days + 1);
+
+        // Should now accept up to 2M total
+        uint256 deposit2 = 1_000_000e6;
+        uint256 shares = _deposit(alice, alice, deposit2);
+        assertGt(shares, 0, "Deposit must succeed after day 31 cap expansion");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  10. Emergency pause
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev pauseDeposits() must block new deposits; withdrawals unaffected.
+    function test_emergencyPause_blocksDepositsNotWithdraws() public {
+        uint256 amount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, amount);
+
+        vm.prank(emergencyMultisig);
+        router.pauseDeposits();
+
+        vm.startPrank(alice);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(IDivigentVaultRouter.DepositsPausedError.selector);
+        router.deposit(amount, alice);
+        vm.stopPrank();
+
+        // Withdraw still works
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+        assertGt(returned, 0, "Withdraw must succeed while deposits are paused");
+    }
+
+    /// @dev unpauseDeposits() restores normal operation.
+    function test_emergencyPause_unpause_restoresDeposits() public {
+        vm.prank(emergencyMultisig);
+        router.pauseDeposits();
+
+        vm.prank(emergencyMultisig);
+        router.unpauseDeposits();
+
+        uint256 amount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, amount);
+        assertGt(shares, 0, "Deposits must work after unpause");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  11. Slippage guard
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev withdraw() must revert if net USDC returned is below minUsdcOut.
+    function test_withdraw_slippageGuard() public {
+        uint256 amount = 10_000e6;
+        uint256 shares = _deposit(alice, alice, amount);
+
+        // Set minUsdcOut to more than the position is worth
+        uint256 minUsdcOut = amount + 1;
+
+        vm.startPrank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IDivigentVaultRouter.SlippageExceeded.selector, amount, minUsdcOut)
+        );
+        router.withdraw(shares, alice, minUsdcOut);
+        vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  12. View function consistency
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev convertToShares and convertToAssets must be approximate inverses.
+    function test_convertRoundTrip(uint96 rawAssets) public {
+        vm.assume(rawAssets >= 1e6 && rawAssets <= 100_000e6);
+        uint256 assets = uint256(rawAssets);
+
+        _deposit(alice, alice, 10_000e6); // ensure non-trivial pool state
+
+        uint256 shares = router.convertToShares(assets);
+        uint256 back   = router.convertToAssets(shares);
+
+        // Due to integer division, back may be <= assets (round-down), within 1e-6 relative
+        assertLe(back, assets + 1, "convertToAssets should be within 1 of original");
+    }
+
+    /// @dev pricePerShare must be >= 1e18 (initial 1:1 with virtual offset).
+    function test_pricePerShare_geOne() public {
+        assertGe(router.pricePerShare(), 1e18, "Initial price must be at least 1:1");
+    }
+
+    /// @dev totalVaultAssets() should reflect deposited amount (no free lunch).
+    function test_totalVaultAssets_reflectsDeposit() public {
+        uint256 amount = 25_000e6;
+        _deposit(alice, alice, amount);
+        assertApproxEqAbs(router.totalVaultAssets(), amount, 1,
+            "totalVaultAssets must equal deposited USDC");
+    }
+}

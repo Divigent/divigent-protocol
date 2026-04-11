@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {IDivigentYieldOracle} from "./IDivigentYieldOracle.sol";
+
+/// @title IDivigentVaultRouter
+/// @notice Interface for DivigentVaultRouter — the central orchestration contract
+///         for the Divigent yield infrastructure protocol.
+interface IDivigentVaultRouter {
+    // ── Events ────────────────────────────────────────────────────────────────
+
+    /// @notice Emitted on every USDC deposit.
+    event Deposited(
+        address indexed wallet,
+        uint256 usdcAmount,
+        uint256 dvUsdcMinted,
+        IDivigentYieldOracle.VaultType indexed vaultType
+    );
+
+    /// @notice Emitted on every withdrawal.
+    event Withdrawn(
+        address indexed wallet,
+        uint256 dvUsdcBurned,
+        uint256 usdcReturned,
+        uint256 yieldEarned,
+        uint256 feePaid
+    );
+
+    /// @notice Emitted when a new agent wallet is authorised.
+    event WalletAuthorised(address indexed wallet);
+
+    /// @notice Emitted when an operator approval is set or revoked.
+    event OperatorSet(
+        address indexed wallet,
+        address indexed operator,
+        bool approved
+    );
+
+    /// @notice Emitted when deposit pause state changes.
+    event DepositsPaused(bool paused);
+
+    // ── Errors ────────────────────────────────────────────────────────────────
+
+    error NotAuthorised();
+    error DepositsPausedError();
+    error ZeroAmount();
+    error TVLCapExceeded(uint256 requested, uint256 cap);
+    error InsufficientShares(uint256 requested, uint256 available);
+    error NotEmergencyMultisig();
+    error WalletAlreadyAuthorised();
+    error PermitExpired();
+    error InvalidAmount();
+    error SlippageExceeded(uint256 received, uint256 minExpected);
+    error InvalidSignature();
+
+    /// @notice Reverts when neither vault can accommodate the requested deposit amount.
+    ///         This may occur when Aave has insufficient available liquidity AND Morpho's
+    ///         maxDeposit is below the requested amount. The depositor should retry with
+    ///         a smaller amount or wait for liquidity conditions to improve.
+    error NoSafeRoute(uint256 amount);
+
+    /// @notice Reverts when the oracle has not been updated within MAX_STALENESS (2 hours).
+    ///         Call DivigentYieldOracle.recordObservation() to refresh the oracle,
+    ///         then retry the deposit.
+    error StaleOracle();
+
+    // ── Authorisation ─────────────────────────────────────────────────────────
+
+    /// @notice Registers msg.sender as an authorised agent wallet.
+    ///         Each wallet must self-register — no third party can register on their
+    ///         behalf without an EIP-712 signature (see initializeFor).
+    function initialize() external;
+
+    /// @notice Registers `wallet` using an EIP-712 signature from `wallet`.
+    ///         Allows a relayer or smart contract to register a wallet on its behalf,
+    ///         enabling gasless onboarding flows where the wallet signs off-chain.
+    /// @param wallet   The agent wallet to authorise.
+    /// @param deadline Unix timestamp after which the signature is invalid.
+    /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline).
+    function initializeFor(
+        address wallet,
+        uint256 deadline,
+        bytes calldata sig
+    ) external;
+
+    /// @notice Grants or revokes operator status for msg.sender's wallet.
+    ///         An operator can call deposit() and withdraw() on behalf of the wallet.
+    ///         The wallet retains full control and may revoke at any time.
+    /// @param operator Address to approve or revoke.
+    /// @param approved True to grant operator status; false to revoke.
+    function setOperator(address operator, bool approved) external;
+
+    /// @notice Returns the current EIP-712 nonce for `wallet`.
+    ///         The nonce is consumed and incremented on each successful initializeFor() call.
+    ///         Off-chain signers should read this value before constructing a signature.
+    function nonces(address wallet) external view returns (uint256);
+
+    // ── Core Operations ───────────────────────────────────────────────────────
+
+    /// @notice Deposits `amount` USDC from `wallet` into the optimal yield vault,
+    ///         minting dvUSDC receipt tokens back to `wallet`.
+    ///         Caller must be `wallet` itself or an authorised operator for `wallet`.
+    ///         `wallet` must have pre-approved the router for at least `amount` USDC.
+    /// @param amount  USDC amount to deposit (6 decimals).
+    /// @param wallet  Agent wallet address (receives dvUSDC).
+    /// @return dvUsdcMinted Number of dvUSDC tokens minted.
+    function deposit(uint256 amount, address wallet)
+        external
+        returns (uint256 dvUsdcMinted);
+
+    /// @notice EIP-2612 permit variant — no prior USDC.approve() required.
+    ///         Combines permit + deposit in a single transaction.
+    function depositWithPermit(
+        uint256 amount,
+        address wallet,
+        uint256 deadline,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    ) external returns (uint256 dvUsdcMinted);
+
+    /// @notice Redeems `shares` dvUSDC from `wallet`, withdrawing USDC from the
+    ///         underlying vault, deducting the 10% yield fee, and returning the
+    ///         remainder to `wallet`.
+    ///         Caller must be `wallet` itself or an authorised operator.
+    ///         Fee is computed on the actual USDC received from vaults, not an estimate,
+    ///         ensuring the principal is never touched regardless of vault rounding.
+    /// @param shares      dvUSDC amount to redeem (6 decimals).
+    /// @param wallet      Agent wallet address (source of dvUSDC, receives USDC).
+    /// @param minUsdcOut  Minimum USDC to receive; reverts if slippage exceeded.
+    /// @return usdcReturned Net USDC returned to the wallet after fee deduction.
+    function withdraw(
+        uint256 shares,
+        address wallet,
+        uint256 minUsdcOut
+    ) external returns (uint256 usdcReturned);
+
+    // ── View: Position & State ─────────────────────────────────────────────────
+
+    /// @notice Returns the total USDC value managed across all vaults.
+    function totalVaultAssets() external view returns (uint256);
+
+    /// @notice Returns the current dvUSDC price in USDC (scaled by 1e18).
+    ///         Monotonically non-decreasing as yield accrues.
+    function pricePerShare() external view returns (uint256);
+
+    /// @notice Returns the current TVL cap in USDC (6 decimals).
+    ///         Expands automatically at day 31 and day 91 post-deployment.
+    function currentTVLCap() external view returns (uint256);
+
+    /// @notice Returns the agent's current position.
+    /// @return depositedUSDC   Original principal deposited (cost basis).
+    /// @return currentValue    Current USDC value of the agent's dvUSDC holdings.
+    /// @return accruedYield    Current unrealised yield (currentValue - depositedUSDC).
+    function getPosition(address wallet)
+        external
+        view
+        returns (
+            uint256 depositedUSDC,
+            uint256 currentValue,
+            uint256 accruedYield
+        );
+
+    // ── View: Preview & Simulation ─────────────────────────────────────────────
+
+    /// @notice Preview how many dvUSDC shares would be minted for a given USDC deposit.
+    ///         Uses the current exchange rate (pre-deposit snapshot semantics).
+    /// @param assets USDC amount to simulate depositing (6 decimals).
+    /// @return dvUsdcOut Expected dvUSDC minted.
+    function previewDeposit(uint256 assets) external view returns (uint256 dvUsdcOut);
+
+    /// @notice Preview the net USDC returned if `wallet` redeems `dvUsdcShares`.
+    ///         Accounts for the 10% yield fee on accrued yield.
+    /// @param dvUsdcShares Shares to simulate redeeming.
+    /// @param wallet       Wallet whose cost basis is used for fee computation.
+    /// @return usdcOut     Expected net USDC after fee.
+    function previewRedeem(uint256 dvUsdcShares, address wallet)
+        external view returns (uint256 usdcOut);
+
+    /// @notice Preview how many dvUSDC shares must be redeemed to receive at least
+    ///         `desiredNetUSDC` after the yield fee is deducted.
+    ///         Rounds up to ensure the user receives at least the requested amount.
+    /// @param desiredNetUSDC Target net USDC after fee (6 decimals).
+    /// @param wallet         Wallet whose cost basis is used for fee computation.
+    /// @return dvUsdcShares  Shares to redeem (capped at wallet's balance).
+    function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
+        external view returns (uint256 dvUsdcShares);
+
+    /// @notice Convert a USDC amount to dvUSDC shares at the current exchange rate.
+    ///         Uses the same virtual-offset formula as deposit().
+    function convertToShares(uint256 assets) external view returns (uint256 shares);
+
+    /// @notice Convert dvUSDC shares to USDC at the current exchange rate.
+    ///         Uses the same virtual-offset formula as withdraw().
+    function convertToAssets(uint256 shares) external view returns (uint256 assets);
+
+    /// @notice Returns the USDC value currently held in each yield vault.
+    /// @return aaveAssets   USDC value of aToken balance in Aave.
+    /// @return morphoAssets USDC value of MetaMorpho shares held by this router.
+    function getCurrentAllocation()
+        external view returns (uint256 aaveAssets, uint256 morphoAssets);
+
+    /// @notice Returns the oracle's recommended vault for a given deposit amount,
+    ///         accounting for amount-aware capacity checks.
+    ///         Reverts with NoSafeRoute if neither vault can accommodate `amount`.
+    /// @param amount USDC amount to route.
+    /// @return vaultType Recommended VaultType (AAVE or MORPHO).
+    function getRecommendedRoute(uint256 amount)
+        external view returns (IDivigentYieldOracle.VaultType vaultType);
+
+    /// @notice Returns the oracle's current freshness status.
+    /// @return lastObservationTime_ Unix timestamp of the most recent observation.
+    /// @return fresh                True if the oracle is within MAX_STALENESS.
+    function oracleStatus()
+        external view returns (uint256 lastObservationTime_, bool fresh);
+
+    // ── Emergency Controls (multisig only) ────────────────────────────────────
+
+    /// @notice Pauses new deposits. Withdrawals remain unaffected at all times.
+    ///         Only callable by the immutable emergency multisig.
+    function pauseDeposits() external;
+
+    /// @notice Resumes deposits after a pause.
+    ///         Only callable by the immutable emergency multisig.
+    function unpauseDeposits() external;
+}
