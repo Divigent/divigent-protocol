@@ -9,6 +9,7 @@
 ########################
 .idea/
 *.iml
+.claude
 
 ########################
 # Foundry / Solidity build
@@ -24,8 +25,12 @@ lib/
 contracts/foundry.lock
 contracts/cache/
 contracts/out/
+contracts/coverage-html/
+lcov.info
 # Vendored deps inside contracts/
 contracts/lib/
+# remappings
+contracts/remappings.txt
 
 ########################
 # Misc

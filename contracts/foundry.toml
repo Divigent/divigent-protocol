@@ -16,4 +16,5 @@ fuzz = { runs = 50000 }
 
 remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "test/=test/",
 ]

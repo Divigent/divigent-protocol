@@ -187,7 +187,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     {
         (uint256 aaveTWAR, uint256 morphoTWAR) = _computeTWAR();
 
-        bool aaveSafe   = _isVaultSafe(VaultType.AAVE);
         bool morphoSafe = _isVaultSafe(VaultType.MORPHO);
 
         // Morpho wins only if: safe AND its TWAR exceeds Aave's by MIN_DIFFERENTIAL_RAY
@@ -304,7 +303,11 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             morphoCumulative: uint224(morphoCumulative)   // intentional truncation
         });
 
-        unchecked { _head++; } // wraps naturally on uint8 overflow → mod BUFFER_SIZE
+        // Advance head with explicit modulo against BUFFER_SIZE.
+        // Do NOT rely on uint8 overflow: uint8 wraps at 256, and 256 % BUFFER_SIZE
+        // (48) = 16, which would silently desync the ring index from _head and
+        // break the chronological-order assumption inside _computeTWAR's walk.
+        _head = uint8((uint256(_head) + 1) % BUFFER_SIZE);
         if (_count < BUFFER_SIZE) _count++;
 
         // ── Step 5: Update state variables ────────────────────────────────────
