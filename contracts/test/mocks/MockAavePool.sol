@@ -28,16 +28,9 @@ contract MockAavePool {
         aToken.mint(onBehalfOf, amount);
     }
 
-    function supplyWithPermit(
-        address,
-        uint256 amount,
-        address onBehalfOf,
-        uint16,
-        uint256,
-        uint8,
-        bytes32,
-        bytes32
-    ) external {
+    function supplyWithPermit(address, uint256 amount, address onBehalfOf, uint16, uint256, uint8, bytes32, bytes32)
+        external
+    {
         usdc.burn(msg.sender, amount);
         aToken.mint(onBehalfOf, amount);
     }
@@ -62,8 +55,8 @@ contract MockAavePool {
             uint128 variableBorrowIndex,
             uint128 currentVariableBorrowRate,
             uint128 currentStableBorrowRate,
-            uint40  lastUpdateTimestamp,
-            uint16  id,
+            uint40 lastUpdateTimestamp,
+            uint16 id,
             address aTokenAddress,
             address stableDebtTokenAddress,
             address variableDebtTokenAddress,

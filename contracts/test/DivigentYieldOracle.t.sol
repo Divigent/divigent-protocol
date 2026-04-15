@@ -11,22 +11,22 @@ contract DivigentYieldOracleTest is TestBase {
     // ----- Constructor tests -----------------
 
     function test_constructor_revertsIfAavePoolIsZero() public {
-        vm.expectRevert("Oracle: zero aavePool");
+        vm.expectRevert(DivigentYieldOracle.ZeroAavePool.selector);
         new DivigentYieldOracle(address(0), address(aToken), address(usdc), address(morphoVault));
     }
 
     function test_constructor_revertsIfATokenIsZero() public {
-        vm.expectRevert("Oracle: zero aToken");
+        vm.expectRevert(DivigentYieldOracle.ZeroAToken.selector);
         new DivigentYieldOracle(address(aavePool), address(0), address(usdc), address(morphoVault));
     }
 
     function test_constructor_revertsIfUsdcIsZero() public {
-        vm.expectRevert("Oracle: zero usdc");
+        vm.expectRevert(DivigentYieldOracle.ZeroUsdc.selector);
         new DivigentYieldOracle(address(aavePool), address(aToken), address(0), address(morphoVault));
     }
 
     function test_constructor_revertsIfMorphoVaultIsZero() public {
-        vm.expectRevert("Oracle: zero morphoVault");
+        vm.expectRevert(DivigentYieldOracle.ZeroMorphoVault.selector);
         new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(0));
     }
 
@@ -34,10 +34,18 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(yieldOracle.aaveCumulative(), 0, "Aave cumulative should start at zero");
         assertEq(yieldOracle.morphoCumulative(), 0, "Morpho cumulative should start at zero");
         assertEq(yieldOracle.aaveSpotRate(), DEFAULT_AAVE_LIQUIDITY_RATE, "Aave spot rate seed mismatch");
-        assertEq(yieldOracle.lastMorphoSharePrice(), morphoVault.convertToAssets(yieldOracle.SHARE_UNIT()), "Morpho price seed mismatch");
+        assertEq(
+            yieldOracle.lastMorphoSharePrice(),
+            morphoVault.convertToAssets(yieldOracle.SHARE_UNIT()),
+            "Morpho price seed mismatch"
+        );
         assertEq(yieldOracle.morphoSpotRate(), 0, "Morpho spot rate should start at zero");
         assertEq(yieldOracle.lastObservationTime(), block.timestamp, "Last observation time seed mismatch");
-        assertEq(uint256(yieldOracle.lastOptimalVaultType()), uint256(IDivigentYieldOracle.VaultType.AAVE), "Default vault type mismatch");
+        assertEq(
+            uint256(yieldOracle.lastOptimalVaultType()),
+            uint256(IDivigentYieldOracle.VaultType.AAVE),
+            "Default vault type mismatch"
+        );
     }
 
     // ----- recordObservation tests -----------------
@@ -145,7 +153,9 @@ contract DivigentYieldOracleTest is TestBase {
         vm.prank(caller);
         yieldOracle.recordObservation();
 
-        assertEq(yieldOracle.lastObservationTime(), block.timestamp, "Permissionless caller should update observation time");
+        assertEq(
+            yieldOracle.lastObservationTime(), block.timestamp, "Permissionless caller should update observation time"
+        );
     }
 
     // ----- TWAR tests -----------------
@@ -190,7 +200,7 @@ contract DivigentYieldOracleTest is TestBase {
     function test_getAllRates_usesNewestCheckpointAtWindowBoundaryAfterBufferWrap() public {
         uint256 elapsed = yieldOracle.MIN_OBSERVATION_INTERVAL();
 
-        _recordObservationAfter(elapsed, 4e25, 1_000_000);  // t = 5m
+        _recordObservationAfter(elapsed, 4e25, 1_000_000); // t = 5m
         _recordObservationAfter(elapsed, 10e25, 1_000_000); // t = 10m
 
         for (uint256 i = 0; i < 47; i++) {
@@ -219,11 +229,9 @@ contract DivigentYieldOracleTest is TestBase {
         IDivigentYieldOracle.VaultRate[] memory rates = yieldOracle.getAllRates();
 
         uint256 totalElapsedFromFirstCheckpoint = elapsed + trailingElapsed;
-        uint256 expectedAaveTwar =
-            ((8e25 * elapsed) + (9e25 * trailingElapsed)) / totalElapsedFromFirstCheckpoint;
+        uint256 expectedAaveTwar = ((8e25 * elapsed) + (9e25 * trailingElapsed)) / totalElapsedFromFirstCheckpoint;
         uint256 expectedMorphoTwar =
-            ((morphoRateOne * elapsed) + (morphoRateTwo * trailingElapsed))
-                / totalElapsedFromFirstCheckpoint;
+            ((morphoRateOne * elapsed) + (morphoRateTwo * trailingElapsed)) / totalElapsedFromFirstCheckpoint;
 
         assertEq(rates[0].twarRate, expectedAaveTwar, "Aave TWAR should use the oldest checkpoint");
         assertEq(rates[1].twarRate, expectedMorphoTwar, "Morpho TWAR should use the oldest checkpoint");
@@ -268,9 +276,7 @@ contract DivigentYieldOracleTest is TestBase {
         uint256 expectedAaveTwar = ((uint256(lowRate) * 32) + (uint256(highRate) * 16)) / 48;
 
         assertEq(
-            rates[0].twarRate,
-            expectedAaveTwar,
-            "TWAR should still use the last 48 intervals after uint8 head overflow"
+            rates[0].twarRate, expectedAaveTwar, "TWAR should still use the last 48 intervals after uint8 head overflow"
         );
         // Morpho share price is held flat throughout, so its derived rate and TWAR should stay zero.
         assertEq(rates[1].twarRate, 0, "Morpho TWAR should remain zero when share price is flat");
@@ -294,7 +300,9 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(rates[0].isSafe, true, "Aave safety mismatch");
 
         assertEq(rates[1].vault, address(morphoVault), "Morpho vault address mismatch");
-        assertEq(uint256(rates[1].vaultType), uint256(IDivigentYieldOracle.VaultType.MORPHO), "Morpho vault type mismatch");
+        assertEq(
+            uint256(rates[1].vaultType), uint256(IDivigentYieldOracle.VaultType.MORPHO), "Morpho vault type mismatch"
+        );
         assertEq(rates[1].spotRate, yieldOracle.morphoSpotRate(), "Morpho spot rate mismatch");
         assertEq(rates[1].isSafe, true, "Morpho safety mismatch");
     }
@@ -310,7 +318,10 @@ contract DivigentYieldOracleTest is TestBase {
 
     function test_isVaultSafe_aaveBelowThresholdIsUnsafe() public {
         _setAaveUtilization(100e6, 9e6);
-        assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE), "Aave below-threshold liquidity should be unsafe");
+        assertFalse(
+            yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE),
+            "Aave below-threshold liquidity should be unsafe"
+        );
     }
 
     function test_isVaultSafe_morphoAtParIsSafe() public {
@@ -375,11 +386,7 @@ contract DivigentYieldOracleTest is TestBase {
         _recordObservationAfter(elapsed, DEFAULT_AAVE_LIQUIDITY_RATE, strongSharePrice);
         vm.warp(block.timestamp + elapsed);
 
-        (
-            address vault,
-            IDivigentYieldOracle.VaultType vaultType,
-            uint256 twarRate
-        ) = yieldOracle.getOptimalVault();
+        (address vault, IDivigentYieldOracle.VaultType vaultType, uint256 twarRate) = yieldOracle.getOptimalVault();
 
         assertEq(vault, address(morphoVault), "Morpho should win when safe and sufficiently better");
         assertEq(uint256(vaultType), uint256(IDivigentYieldOracle.VaultType.MORPHO), "Vault type should be MORPHO");
@@ -396,7 +403,11 @@ contract DivigentYieldOracleTest is TestBase {
         (address vault, IDivigentYieldOracle.VaultType vaultType,) = yieldOracle.getOptimalVault();
 
         assertEq(vault, address(aavePool), "Unsafe Morpho should always fall back to Aave");
-        assertEq(uint256(vaultType), uint256(IDivigentYieldOracle.VaultType.AAVE), "Unsafe Morpho should always yield AAVE type");
+        assertEq(
+            uint256(vaultType),
+            uint256(IDivigentYieldOracle.VaultType.AAVE),
+            "Unsafe Morpho should always yield AAVE type"
+        );
     }
 
     function testFuzz_lastGoodObservationAge_matchesWarpedTime(uint64 elapsed) public {
@@ -448,9 +459,8 @@ contract DivigentYieldOracleTest is TestBase {
 
     function test_recordObservation_firstObservationBootstrap() public {
         // Deploy a fresh oracle to test the first-ever observation
-        DivigentYieldOracle freshOracle = new DivigentYieldOracle(
-            address(aavePool), address(aToken), address(usdc), address(morphoVault)
-        );
+        DivigentYieldOracle freshOracle =
+            new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
 
         // Before any observation
         assertEq(freshOracle.morphoSpotRate(), 0, "morphoSpotRate should be 0 before first observation");
@@ -501,8 +511,7 @@ contract DivigentYieldOracleTest is TestBase {
         uint256 newPrice = 1_050_000; // 5% jump in one interval
 
         // Expected: (50000 * 31557600 * 1e27) / 1000000 / 300
-        uint256 expected = (50_000 * yieldOracle.SECONDS_PER_YEAR() * yieldOracle.RAY())
-            / lastPrice / interval;
+        uint256 expected = (50_000 * yieldOracle.SECONDS_PER_YEAR() * yieldOracle.RAY()) / lastPrice / interval;
 
         _recordObservationAfter(interval, 8e25, newPrice);
 
@@ -737,8 +746,7 @@ contract DivigentYieldOracleTest is TestBase {
         // available = 10e6 - 1 → unsafe
         _setAaveUtilization(100e6, 10e6 - 1);
         assertFalse(
-            yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE),
-            "One wei below 10% threshold should be unsafe"
+            yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE), "One wei below 10% threshold should be unsafe"
         );
     }
 
@@ -753,10 +761,7 @@ contract DivigentYieldOracleTest is TestBase {
 
     function test_isVaultSafe_morphoSharePriceZero() public {
         morphoVault.setSharePrice(0);
-        assertFalse(
-            yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO),
-            "Zero share price should be unsafe"
-        );
+        assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Zero share price should be unsafe");
     }
 
     function test_isVaultSafe_aaveDonationFlipsSafety() public {
@@ -836,12 +841,12 @@ contract DivigentYieldOracleTest is TestBase {
     ///      on the intervals where the price DOES tick. Finding is overstated
     ///      at moderate APYs.
     function test_audit_truncationAt5PctAPY_selfCorrects() public {
-        uint256 SU       = yieldOracle.SHARE_UNIT();
-        uint256 SPY      = yieldOracle.SECONDS_PER_YEAR();
+        uint256 SU = yieldOracle.SHARE_UNIT();
+        uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
 
-        uint128 aaveRate   = 0.03e27; // 3%
-        uint256 morphoBps  = 500;     // 5%
+        uint128 aaveRate = 0.03e27; // 3%
+        uint256 morphoBps = 500; // 5%
 
         // Per-interval delta truncates to 0
         uint256 rawDelta = (SU * morphoBps * interval) / (10_000 * SPY);
@@ -867,12 +872,12 @@ contract DivigentYieldOracleTest is TestBase {
     ///      threshold and win routing. This disproves the stronger claim that all
     ///      low single-digit APY regimes necessarily break routing.
     function test_audit_truncationAt07PctAPY_stillClearsRoutingThreshold() public {
-        uint256 SU       = yieldOracle.SHARE_UNIT();
-        uint256 SPY      = yieldOracle.SECONDS_PER_YEAR();
+        uint256 SU = yieldOracle.SHARE_UNIT();
+        uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
 
-        uint128 aaveRate  = 0.001e27; // 0.1%
-        uint256 morphoBps = 70;       // 0.7%
+        uint128 aaveRate = 0.001e27; // 0.1%
+        uint256 morphoBps = 70; // 0.7%
 
         uint256 zeroCount;
         for (uint256 i = 1; i <= 48; i++) {
@@ -891,9 +896,10 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(uint256(vt), uint256(IDivigentYieldOracle.VaultType.MORPHO));
 
         IDivigentYieldOracle.VaultRate[] memory r = yieldOracle.getAllRates();
-        emit log_named_uint("morphoTWAR", r[1].twarRate);
-        emit log_named_uint("aaveTWAR",   r[0].twarRate);
-        emit log_named_uint("zero-rate obs", zeroCount);
+        // Morpho TWAR should be non-zero (hurdle cleared) and strictly greater
+        // than Aave's under the rate spread exercised above.
+        assertGt(r[1].twarRate, 0, "morpho TWAR must be non-zero after observations accumulate");
+        assertGt(r[1].twarRate, r[0].twarRate, "morpho TWAR exceeds aave TWAR");
     }
 
     function _expectedMorphoRate(uint256 lastPrice, uint256 currentPrice, uint256 elapsed)
@@ -901,11 +907,7 @@ contract DivigentYieldOracleTest is TestBase {
         view
         returns (uint256)
     {
-        return (currentPrice - lastPrice)
-            * yieldOracle.SECONDS_PER_YEAR()
-            * yieldOracle.RAY()
-            / lastPrice
-            / elapsed;
+        return (currentPrice - lastPrice) * yieldOracle.SECONDS_PER_YEAR() * yieldOracle.RAY() / lastPrice / elapsed;
     }
 
     function _recordObservationAfter(uint256 elapsed, uint128 nextAaveRate, uint256 nextSharePrice) internal {

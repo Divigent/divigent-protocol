@@ -11,11 +11,7 @@ contract MockOracle {
     function getOptimalVault()
         external
         view
-        returns (
-            uint256 aaveRate,
-            IDivigentYieldOracle.VaultType vaultType,
-            uint256 morphoRate
-        )
+        returns (uint256 aaveRate, IDivigentYieldOracle.VaultType vaultType, uint256 morphoRate)
     {
         return (0, optimalVault, 0);
     }

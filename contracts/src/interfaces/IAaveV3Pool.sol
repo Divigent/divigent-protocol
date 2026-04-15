@@ -15,12 +15,7 @@ interface IAaveV3Pool {
     /// @param amount      The amount to supply, in asset decimals.
     /// @param onBehalfOf  The address that will receive the aTokens.
     /// @param referralCode Protocol referral code (use 0).
-    function supply(
-        address asset,
-        uint256 amount,
-        address onBehalfOf,
-        uint16 referralCode
-    ) external;
+    function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
 
     /// @notice EIP-2612 permit variant of supply — no separate approve tx required.
     function supplyWithPermit(
@@ -42,11 +37,7 @@ interface IAaveV3Pool {
     /// @param amount  Amount to withdraw (use type(uint256).max for full position).
     /// @param to      Address that receives the withdrawn USDC.
     /// @return        The actual amount withdrawn.
-    function withdraw(
-        address asset,
-        uint256 amount,
-        address to
-    ) external returns (uint256);
+    function withdraw(address asset, uint256 amount, address to) external returns (uint256);
 
     // ── View ──────────────────────────────────────────────────────────────────
 
@@ -60,12 +51,12 @@ interface IAaveV3Pool {
         returns (
             uint256 configuration,
             uint128 liquidityIndex,
-            uint128 currentLiquidityRate,   // APY for suppliers, in ray (1e27)
+            uint128 currentLiquidityRate, // APY for suppliers, in ray (1e27)
             uint128 variableBorrowIndex,
             uint128 currentVariableBorrowRate,
             uint128 currentStableBorrowRate,
-            uint40  lastUpdateTimestamp,
-            uint16  id,
+            uint40 lastUpdateTimestamp,
+            uint16 id,
             address aTokenAddress,
             address stableDebtTokenAddress,
             address variableDebtTokenAddress,

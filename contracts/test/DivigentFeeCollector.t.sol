@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test, Vm, stdError} from "forge-std/Test.sol";
 
 import {DivigentFeeCollector} from "../src/DivigentFeeCollector.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -152,18 +152,21 @@ contract DivigentFeeCollectorTest is Test {
     }
 
     function test_collectFee_revertsWhenRouterInsufficientBalance() public {
-        // No USDC on router, approval irrelevant
+        // No USDC on router, approval irrelevant. MockERC20.transferFrom decrements
+        // balanceOf[from] with checked math -> arithmetic underflow panic (0x11).
         usdc.approve(address(collector), type(uint256).max);
 
-        vm.expectRevert();
+        vm.expectRevert(stdError.arithmeticError);
         collector.collectFee(wallet, 100e6);
     }
 
     function test_collectFee_revertsWhenRouterInsufficientAllowance() public {
+        // Router holds USDC but allowance is 0 -> allowance -= amount underflows
+        // on the checked-math path -> arithmetic panic (0x11).
         usdc.mint(address(this), 100e6);
         usdc.approve(address(collector), 0);
 
-        vm.expectRevert();
+        vm.expectRevert(stdError.arithmeticError);
         collector.collectFee(wallet, 100e6);
     }
 
@@ -204,11 +207,7 @@ contract DivigentFeeCollectorTest is Test {
 
         collector.collectFee(wallet, 1_000e6);
 
-        assertEq(
-            usdc.balanceOf(address(collector)),
-            0,
-            "Collector should hold zero USDC after collectFee"
-        );
+        assertEq(usdc.balanceOf(address(collector)), 0, "Collector should hold zero USDC after collectFee");
     }
 
     function test_collectFee_walletAddressZero_stillWorks() public {

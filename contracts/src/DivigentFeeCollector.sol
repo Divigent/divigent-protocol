@@ -50,11 +50,7 @@ contract DivigentFeeCollector {
     /// @param wallet      The agent wallet from which the fee was derived.
     /// @param yieldEarned The gross yield earned by the agent (before fee).
     /// @param feeAmount   The fee amount transferred to TREASURY.
-    event FeeCollected(
-        address indexed wallet,
-        uint256 yieldEarned,
-        uint256 feeAmount
-    );
+    event FeeCollected(address indexed wallet, uint256 yieldEarned, uint256 feeAmount);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -69,12 +65,12 @@ contract DivigentFeeCollector {
     /// @param treasury    The 2-of-3 multisig treasury address.
     /// @param vaultRouter The DivigentVaultRouter address.
     constructor(address usdc, address treasury, address vaultRouter) {
-        if (usdc == address(0))        revert ZeroUsdc();
-        if (treasury == address(0))    revert ZeroTreasury();
+        if (usdc == address(0)) revert ZeroUsdc();
+        if (treasury == address(0)) revert ZeroTreasury();
         if (vaultRouter == address(0)) revert ZeroRouter();
 
-        USDC         = IERC20(usdc);
-        TREASURY     = treasury;
+        USDC = IERC20(usdc);
+        TREASURY = treasury;
         VAULT_ROUTER = vaultRouter;
     }
 
@@ -91,11 +87,7 @@ contract DivigentFeeCollector {
     ///         Useful for off-chain simulation and SDK preview calls.
     /// @param yieldEarned Gross yield earned in USDC (6 decimals).
     /// @return fee        Protocol fee in USDC (always <= 10% of yieldEarned).
-    function calculateFee(uint256 yieldEarned)
-        public
-        pure
-        returns (uint256 fee)
-    {
+    function calculateFee(uint256 yieldEarned) public pure returns (uint256 fee) {
         // Solidity 0.8.x checked arithmetic — no overflow possible with 6-decimal USDC
         fee = (yieldEarned * FEE_BPS) / BPS_DENOMINATOR;
     }
@@ -123,11 +115,7 @@ contract DivigentFeeCollector {
     /// @param wallet      The agent wallet (for event indexing).
     /// @param yieldEarned The actual realised yield on which the fee is calculated.
     /// @return feeAmount  The amount transferred to TREASURY.
-    function collectFee(address wallet, uint256 yieldEarned)
-        external
-        onlyVaultRouter
-        returns (uint256 feeAmount)
-    {
+    function collectFee(address wallet, uint256 yieldEarned) external onlyVaultRouter returns (uint256 feeAmount) {
         // If no yield was earned (principal-only withdrawal), fee is zero.
         // This guard is also the primary invariant enforcement: principal is never touched.
         if (yieldEarned == 0) return 0;

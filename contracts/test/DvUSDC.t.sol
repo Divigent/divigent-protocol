@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+
 import {DvUSDC} from "../src/dvUSDC.sol";
 
 /// @notice Unit tests for dvUSDC — access control, non-transferability, mint/burn, metadata.
@@ -21,7 +23,7 @@ contract DvUSDCTest is Test {
     // ── Constructor ───────────────────────────────────────────────────────────
 
     function test_constructor_revertsWhenRouterIsZero() public {
-        vm.expectRevert(bytes("dvUSDC: zero router"));
+        vm.expectRevert(DvUSDC.ZeroRouter.selector);
         new DvUSDC(address(0));
     }
 
@@ -35,13 +37,13 @@ contract DvUSDCTest is Test {
     // ── Mint / burn (only vault router) ───────────────────────────────────────
 
     function test_mint_revertsWhenCallerIsNotVaultRouter() public {
-        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice, vaultRouter));
+        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice));
         vm.prank(alice);
         token.mint(bob, 1e6);
     }
 
     function test_burn_revertsWhenCallerIsNotVaultRouter() public {
-        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice, vaultRouter));
+        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice));
         vm.prank(alice);
         token.burn(bob, 1e6);
     }
@@ -87,7 +89,7 @@ contract DvUSDCTest is Test {
         vm.prank(vaultRouter);
         token.mint(alice, 10e6);
 
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, alice, 10e6, 11e6));
         vm.prank(vaultRouter);
         token.burn(alice, 11e6);
     }
@@ -137,13 +139,13 @@ contract DvUSDCTest is Test {
     // ── NEW: edge cases and invariants ──────────────────────────────────────
 
     function test_mint_toAddressZero_reverts() public {
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
         vm.prank(vaultRouter);
         token.mint(address(0), 100e6);
     }
 
     function test_burn_fromAddressZero_reverts() public {
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidSender.selector, address(0)));
         vm.prank(vaultRouter);
         token.burn(address(0), 100e6);
     }
@@ -160,8 +162,8 @@ contract DvUSDCTest is Test {
     }
 
     function test_burn_zeroBalanceReverts() public {
-        // Bob has no tokens
-        vm.expectRevert();
+        // Bob has no tokens.
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, bob, 0, 1));
         vm.prank(vaultRouter);
         token.burn(bob, 1);
     }
@@ -182,13 +184,13 @@ contract DvUSDCTest is Test {
     }
 
     function test_mint_nonRouterWithZeroAmount_stillReverts() public {
-        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice, vaultRouter));
+        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice));
         vm.prank(alice);
         token.mint(bob, 0);
     }
 
     function test_burn_nonRouterWithZeroAmount_stillReverts() public {
-        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice, vaultRouter));
+        vm.expectRevert(abi.encodeWithSelector(DvUSDC.OnlyVaultRouter.selector, alice));
         vm.prank(alice);
         token.burn(bob, 0);
     }

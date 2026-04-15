@@ -10,6 +10,7 @@
 .idea/
 *.iml
 .claude
+.audit/
 
 ########################
 # Foundry / Solidity build

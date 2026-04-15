@@ -10,6 +10,7 @@ via_ir = true
 [profile.default.fuzz]
 runs = 10000
 max_test_rejects = 65536
+seed = "0x640" # Reproducible seed (Aave V4 convention).
 
 [profile.ci]
 fuzz = { runs = 50000 }

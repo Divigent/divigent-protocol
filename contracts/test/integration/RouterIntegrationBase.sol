@@ -12,15 +12,15 @@ import {MockMorphoVault} from "../mocks/MockMorphoVault.sol";
 import {MockOracle} from "../mocks/MockOracle.sol";
 
 contract RouterIntegrationBase is Test {
-    DivigentVaultRouter  internal router;
+    DivigentVaultRouter internal router;
     DivigentFeeCollector internal feeCollector;
-    DvUSDC               internal dvUsdc;
+    DvUSDC internal dvUsdc;
 
-    MockERC20       internal usdc;
-    MockERC20       internal aToken;
-    MockAavePool    internal aavePool;
+    MockERC20 internal usdc;
+    MockERC20 internal aToken;
+    MockAavePool internal aavePool;
     MockMorphoVault internal morphoVault;
-    MockOracle      internal oracle;
+    MockOracle internal oracle;
 
     address internal treasury = makeAddr("treasury");
     address internal emergencyMultisig = makeAddr("multisig");

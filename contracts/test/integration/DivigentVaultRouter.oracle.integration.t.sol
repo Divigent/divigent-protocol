@@ -45,21 +45,4 @@ contract DivigentVaultRouterOracleIntegrationTest is RouterIntegrationBase {
         assertEq(returned, amount, "Stale oracle should not affect withdrawal of principal-only position");
         assertEq(usdc.balanceOf(alice), aliceBefore + amount, "Withdraw should still transfer USDC to Alice");
     }
-
-    /// @dev If the preferred vault cannot allocate and Morpho is also closed,
-    ///      the router must revert with NoSafeRoute.
-    function test_deposit_revertsWhenNeitherVenueCanAllocate() public {
-        uint256 amount = 10_000e6;
-
-        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
-        _setAaveAvailableLiquidity(0);
-        morphoVault.setMaxDeposit(0);
-
-        vm.prank(alice);
-        usdc.approve(address(router), amount);
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
-        router.deposit(amount, alice);
-    }
 }

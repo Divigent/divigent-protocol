@@ -12,7 +12,7 @@ contract MockMorphoVault {
     uint256 public maxDepositAmount = type(uint256).max;
     uint256 public maxWithdrawAmount = type(uint256).max;
     uint256 public manualSharePrice = SHARE_UNIT;
-    bool    public useManualSharePrice;
+    bool public useManualSharePrice;
 
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -82,6 +82,10 @@ contract MockMorphoVault {
     }
 
     function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares) {
+        // Mirror real ERC-4626: reject assets > maxWithdraw so invariant tests
+        // can model Morpho illiquidity via setMaxWithdraw(cap).
+        require(assets <= maxWithdrawAmount, "MockMorphoVault: exceeds maxWithdraw");
+
         shares = _assetsToSharesRoundUp(assets);
 
         if (msg.sender != owner) {

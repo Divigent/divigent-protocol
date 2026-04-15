@@ -13,14 +13,14 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockMorphoVault} from "./mocks/MockMorphoVault.sol";
 
 contract TestBase is Test {
-    DivigentVaultRouter  internal router;
-    DivigentYieldOracle  internal yieldOracle;
+    DivigentVaultRouter internal router;
+    DivigentYieldOracle internal yieldOracle;
     DivigentFeeCollector internal feeCollector;
-    DvUSDC               internal dvUsdc;
+    DvUSDC internal dvUsdc;
 
-    MockERC20      internal usdc;
-    MockERC20      internal aToken;
-    MockAavePool   internal aavePool;
+    MockERC20 internal usdc;
+    MockERC20 internal aToken;
+    MockAavePool internal aavePool;
     MockMorphoVault internal morphoVault;
 
     address internal treasury = makeAddr("treasury");
@@ -65,23 +65,14 @@ contract TestBase is Test {
     }
 
     function _deployYieldOracle() internal {
-        yieldOracle = new DivigentYieldOracle(
-            address(aavePool),
-            address(aToken),
-            address(usdc),
-            address(morphoVault)
-        );
+        yieldOracle = new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
     }
 
     function _deployRouterStack() internal {
         uint256 currentNonce = vm.getNonce(address(this));
         address expectedRouterAddr = vm.computeCreateAddress(address(this), currentNonce + 2);
 
-        feeCollector = new DivigentFeeCollector(
-            address(usdc),
-            treasury,
-            expectedRouterAddr
-        );
+        feeCollector = new DivigentFeeCollector(address(usdc), treasury, expectedRouterAddr);
 
         dvUsdc = new DvUSDC(expectedRouterAddr);
 
