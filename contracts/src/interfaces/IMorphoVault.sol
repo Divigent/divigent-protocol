@@ -48,7 +48,11 @@ interface IMorphoVault {
     /// @notice Redeem `shares` for USDC, sending assets to `receiver`.
     ///         Caller must own or be approved for `shares`.
     /// @return assets The amount of USDC returned.
-    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+    function redeem(
+        uint256 shares,
+        address receiver,
+        address owner
+    ) external returns (uint256 assets);
 
     /// @notice Withdraw exactly `assets` USDC to `receiver`, burning however many
     ///         shares are required. Implements ERC-4626 exact-asset withdrawal semantics.
@@ -59,7 +63,11 @@ interface IMorphoVault {
     /// @param receiver Address to receive the USDC.
     /// @param owner    Address whose shares are burned.
     /// @return shares  Number of vault shares burned.
-    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
+    function withdraw(
+        uint256 assets,
+        address receiver,
+        address owner
+    ) external returns (uint256 shares);
 
     /// @notice Returns the maximum USDC that `owner` can withdraw from the vault in a
     ///         single call, accounting for liquidity constraints in the underlying markets.

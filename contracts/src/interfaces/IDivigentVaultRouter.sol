@@ -19,14 +19,22 @@ interface IDivigentVaultRouter {
 
     /// @notice Emitted on every withdrawal.
     event Withdrawn(
-        address indexed wallet, uint256 dvUsdcBurned, uint256 usdcReturned, uint256 yieldEarned, uint256 feePaid
+        address indexed wallet,
+        uint256 dvUsdcBurned,
+        uint256 usdcReturned,
+        uint256 yieldEarned,
+        uint256 feePaid
     );
 
     /// @notice Emitted when a new agent wallet is authorised.
     event WalletAuthorised(address indexed wallet);
 
     /// @notice Emitted when an operator approval is set or revoked.
-    event OperatorSet(address indexed wallet, address indexed operator, bool approved);
+    event OperatorSet(
+        address indexed wallet,
+        address indexed operator,
+        bool approved
+    );
 
     /// @notice Emitted when deposit pause state changes.
     event DepositsPaused(bool paused);
@@ -44,17 +52,6 @@ interface IDivigentVaultRouter {
     error InvalidAmount();
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();
-
-    /// @notice Constructor-side zero-address errors. One per dependency so the
-    ///         revert reason pinpoints the misconfigured argument.
-    error ZeroUsdc();
-    error ZeroAavePool();
-    error ZeroAToken();
-    error ZeroMorphoVault();
-    error ZeroOracle();
-    error ZeroFeeCollector();
-    error ZeroDvUsdc();
-    error ZeroEmergencyMultisig();
 
     /// @notice Reverts when neither vault can accommodate the requested deposit amount.
     ///         This may occur when Aave has insufficient available liquidity AND Morpho's
@@ -80,7 +77,11 @@ interface IDivigentVaultRouter {
     /// @param wallet   The agent wallet to authorise.
     /// @param deadline Unix timestamp after which the signature is invalid.
     /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline).
-    function initializeFor(address wallet, uint256 deadline, bytes calldata sig) external;
+    function initializeFor(
+        address wallet,
+        uint256 deadline,
+        bytes calldata sig
+    ) external;
 
     /// @notice Grants or revokes operator status for msg.sender's wallet.
     ///         An operator can call deposit() and withdraw() on behalf of the wallet.
@@ -103,13 +104,20 @@ interface IDivigentVaultRouter {
     /// @param amount  USDC amount to deposit (6 decimals).
     /// @param wallet  Agent wallet address (receives dvUSDC).
     /// @return dvUsdcMinted Number of dvUSDC tokens minted.
-    function deposit(uint256 amount, address wallet) external returns (uint256 dvUsdcMinted);
+    function deposit(uint256 amount, address wallet)
+        external
+        returns (uint256 dvUsdcMinted);
 
     /// @notice EIP-2612 permit variant — no prior USDC.approve() required.
     ///         Combines permit + deposit in a single transaction.
-    function depositWithPermit(uint256 amount, address wallet, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
-        external
-        returns (uint256 dvUsdcMinted);
+    function depositWithPermit(
+        uint256 amount,
+        address wallet,
+        uint256 deadline,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    ) external returns (uint256 dvUsdcMinted);
 
     /// @notice Redeems `shares` dvUSDC from `wallet`, withdrawing USDC from the
     ///         underlying vault, deducting the 10% yield fee, and returning the
@@ -121,7 +129,11 @@ interface IDivigentVaultRouter {
     /// @param wallet      Agent wallet address (source of dvUSDC, receives USDC).
     /// @param minUsdcOut  Minimum USDC to receive; reverts if slippage exceeded.
     /// @return usdcReturned Net USDC returned to the wallet after fee deduction.
-    function withdraw(uint256 shares, address wallet, uint256 minUsdcOut) external returns (uint256 usdcReturned);
+    function withdraw(
+        uint256 shares,
+        address wallet,
+        uint256 minUsdcOut
+    ) external returns (uint256 usdcReturned);
 
     // ── View: Position & State ─────────────────────────────────────────────────
 
@@ -143,7 +155,11 @@ interface IDivigentVaultRouter {
     function getPosition(address wallet)
         external
         view
-        returns (uint256 depositedUSDC, uint256 currentValue, uint256 accruedYield);
+        returns (
+            uint256 depositedUSDC,
+            uint256 currentValue,
+            uint256 accruedYield
+        );
 
     // ── View: Preview & Simulation ─────────────────────────────────────────────
 
@@ -158,7 +174,8 @@ interface IDivigentVaultRouter {
     /// @param dvUsdcShares Shares to simulate redeeming.
     /// @param wallet       Wallet whose cost basis is used for fee computation.
     /// @return usdcOut     Expected net USDC after fee.
-    function previewRedeem(uint256 dvUsdcShares, address wallet) external view returns (uint256 usdcOut);
+    function previewRedeem(uint256 dvUsdcShares, address wallet)
+        external view returns (uint256 usdcOut);
 
     /// @notice Preview how many dvUSDC shares must be redeemed to receive at least
     ///         `desiredNetUSDC` after the yield fee is deducted.
@@ -166,7 +183,8 @@ interface IDivigentVaultRouter {
     /// @param desiredNetUSDC Target net USDC after fee (6 decimals).
     /// @param wallet         Wallet whose cost basis is used for fee computation.
     /// @return dvUsdcShares  Shares to redeem (capped at wallet's balance).
-    function previewWithdrawNet(uint256 desiredNetUSDC, address wallet) external view returns (uint256 dvUsdcShares);
+    function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
+        external view returns (uint256 dvUsdcShares);
 
     /// @notice Convert a USDC amount to dvUSDC shares at the current exchange rate.
     ///         Uses the same virtual-offset formula as deposit().
@@ -179,19 +197,22 @@ interface IDivigentVaultRouter {
     /// @notice Returns the USDC value currently held in each yield vault.
     /// @return aaveAssets   USDC value of aToken balance in Aave.
     /// @return morphoAssets USDC value of MetaMorpho shares held by this router.
-    function getCurrentAllocation() external view returns (uint256 aaveAssets, uint256 morphoAssets);
+    function getCurrentAllocation()
+        external view returns (uint256 aaveAssets, uint256 morphoAssets);
 
     /// @notice Returns the oracle's recommended vault for a given deposit amount,
     ///         accounting for amount-aware capacity checks.
     ///         Reverts with NoSafeRoute if neither vault can accommodate `amount`.
     /// @param amount USDC amount to route.
     /// @return vaultType Recommended VaultType (AAVE or MORPHO).
-    function getRecommendedRoute(uint256 amount) external view returns (IDivigentYieldOracle.VaultType vaultType);
+    function getRecommendedRoute(uint256 amount)
+        external view returns (IDivigentYieldOracle.VaultType vaultType);
 
     /// @notice Returns the oracle's current freshness status.
     /// @return lastObservationTime_ Unix timestamp of the most recent observation.
     /// @return fresh                True if the oracle is within MAX_STALENESS.
-    function oracleStatus() external view returns (uint256 lastObservationTime_, bool fresh);
+    function oracleStatus()
+        external view returns (uint256 lastObservationTime_, bool fresh);
 
     // ── Emergency Controls (multisig only) ────────────────────────────────────
 

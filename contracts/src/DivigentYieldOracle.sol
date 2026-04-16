@@ -54,6 +54,7 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentYieldOracle is IDivigentYieldOracle {
+
     // ── Constants ─────────────────────────────────────────────────────────────
 
     /// @notice TWAR window: 4 hours in seconds.
@@ -76,7 +77,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice Safety threshold: maximum utilisation before a vault is excluded.
     ///         Stored as a fraction of BPS_DENOMINATOR.
     uint256 public constant UTILISATION_THRESHOLD_BPS = 9_000; // 90%
-    uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint256 public constant BPS_DENOMINATOR           = 10_000;
 
     /// @notice Minimum APY differential (annualised, in RAY) to trigger a vault switch.
     ///         0.50% × 1e27 (expressed in ray terms for comparison with TWAR rates).
@@ -94,13 +95,13 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     // ── Immutables ────────────────────────────────────────────────────────────
 
     /// @notice Aave V3 Pool on Base mainnet.
-    IAaveV3Pool public immutable AAVE_POOL;
+    IAaveV3Pool  public immutable AAVE_POOL;
 
     /// @notice aUSDC token address (used to read Aave utilisation).
-    IERC20 public immutable A_TOKEN;
+    IERC20       public immutable A_TOKEN;
 
     /// @notice USDC token address on Base mainnet.
-    IERC20 public immutable USDC;
+    IERC20       public immutable USDC;
 
     /// @notice MetaMorpho vault (ERC-4626) for Morpho Steakhouse / Prime USDC.
     IMorphoVault public immutable MORPHO_VAULT;
@@ -112,16 +113,16 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///      Cumulatives are truncated to uint224 — overflow is intentional and safe
     ///      because we only use the *difference* between two checkpoints (like Uniswap V2).
     struct Checkpoint {
-        uint32 timestamp;
-        uint64 morphoSharePrice; // convertToAssets(SHARE_UNIT) at this checkpoint, 6 dec
-        uint224 aaveCumulative; // Σ aaveRate × Δt (in RAY·seconds), truncated
-        uint224 morphoCumulative; // Σ morphoRate × Δt (in RAY·seconds), truncated
+        uint32  timestamp;
+        uint64  morphoSharePrice;  // convertToAssets(SHARE_UNIT) at this checkpoint, 6 dec
+        uint224 aaveCumulative;    // Σ aaveRate × Δt (in RAY·seconds), truncated
+        uint224 morphoCumulative;  // Σ morphoRate × Δt (in RAY·seconds), truncated
     }
 
     /// @dev Circular buffer of TWAR checkpoints.
     Checkpoint[48] private _checkpoints; // fixed-size for gas efficiency
-    uint8 private _head; // index of the next slot to write
-    uint8 private _count; // number of populated slots (0..BUFFER_SIZE)
+    uint8  private _head;   // index of the next slot to write
+    uint8  private _count;  // number of populated slots (0..BUFFER_SIZE)
 
     /// @notice Running cumulative accumulators (full uint256, no truncation).
     uint256 public aaveCumulative;
@@ -144,26 +145,24 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
-    // ── Errors ────────────────────────────────────────────────────────────────
-
-    error ZeroAavePool();
-    error ZeroAToken();
-    error ZeroUsdc();
-    error ZeroMorphoVault();
-
     /// @param aavePool    Aave V3 Pool address on Base.
     /// @param aToken      aUSDC address on Base.
     /// @param usdc        USDC address on Base.
     /// @param morphoVault MetaMorpho USDC vault address on Base.
-    constructor(address aavePool, address aToken, address usdc, address morphoVault) {
-        if (aavePool == address(0)) revert ZeroAavePool();
-        if (aToken == address(0)) revert ZeroAToken();
-        if (usdc == address(0)) revert ZeroUsdc();
-        if (morphoVault == address(0)) revert ZeroMorphoVault();
+    constructor(
+        address aavePool,
+        address aToken,
+        address usdc,
+        address morphoVault
+    ) {
+        require(aavePool    != address(0), "Oracle: zero aavePool");
+        require(aToken      != address(0), "Oracle: zero aToken");
+        require(usdc        != address(0), "Oracle: zero usdc");
+        require(morphoVault != address(0), "Oracle: zero morphoVault");
 
-        AAVE_POOL = IAaveV3Pool(aavePool);
-        A_TOKEN = IERC20(aToken);
-        USDC = IERC20(usdc);
+        AAVE_POOL    = IAaveV3Pool(aavePool);
+        A_TOKEN      = IERC20(aToken);
+        USDC         = IERC20(usdc);
         MORPHO_VAULT = IMorphoVault(morphoVault);
 
         // Seed Aave rate from on-chain data
@@ -171,22 +170,29 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
         // Seed Morpho share price — no rate yet (need two snapshots for a valid rate)
         lastMorphoSharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
-        morphoSpotRate = 0; // conservative: wait for first observation interval
+        morphoSpotRate       = 0; // conservative: wait for first observation interval
 
-        lastObservationTime = block.timestamp;
+        lastObservationTime  = block.timestamp;
         lastOptimalVaultType = VaultType.AAVE; // conservative default
     }
 
     // ── External: IDivigentYieldOracle ────────────────────────────────────────
 
     /// @inheritdoc IDivigentYieldOracle
-    function getOptimalVault() external view override returns (address vault, VaultType vaultType, uint256 twarRate) {
+    function getOptimalVault()
+        external
+        view
+        override
+        returns (address vault, VaultType vaultType, uint256 twarRate)
+    {
         (uint256 aaveTWAR, uint256 morphoTWAR) = _computeTWAR();
 
         bool morphoSafe = _isVaultSafe(VaultType.MORPHO);
 
         // Morpho wins only if: safe AND its TWAR exceeds Aave's by MIN_DIFFERENTIAL_RAY
-        bool morphoWins = morphoSafe && (morphoTWAR > aaveTWAR) && (morphoTWAR - aaveTWAR >= MIN_DIFFERENTIAL_RAY);
+        bool morphoWins = morphoSafe
+            && (morphoTWAR > aaveTWAR)
+            && (morphoTWAR - aaveTWAR >= MIN_DIFFERENTIAL_RAY);
 
         if (morphoWins) {
             return (address(MORPHO_VAULT), VaultType.MORPHO, morphoTWAR);
@@ -199,30 +205,40 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function getAllRates() external view override returns (VaultRate[] memory rates) {
+    function getAllRates()
+        external
+        view
+        override
+        returns (VaultRate[] memory rates)
+    {
         (uint256 aaveTWAR, uint256 morphoTWAR) = _computeTWAR();
 
         rates = new VaultRate[](2);
 
         rates[0] = VaultRate({
-            vault: address(AAVE_POOL),
+            vault:     address(AAVE_POOL),
             vaultType: VaultType.AAVE,
-            spotRate: aaveSpotRate,
-            twarRate: aaveTWAR,
-            isSafe: _isVaultSafe(VaultType.AAVE)
+            spotRate:  aaveSpotRate,
+            twarRate:  aaveTWAR,
+            isSafe:    _isVaultSafe(VaultType.AAVE)
         });
 
         rates[1] = VaultRate({
-            vault: address(MORPHO_VAULT),
+            vault:     address(MORPHO_VAULT),
             vaultType: VaultType.MORPHO,
-            spotRate: morphoSpotRate,
-            twarRate: morphoTWAR,
-            isSafe: _isVaultSafe(VaultType.MORPHO)
+            spotRate:  morphoSpotRate,
+            twarRate:  morphoTWAR,
+            isSafe:    _isVaultSafe(VaultType.MORPHO)
         });
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function isVaultSafe(VaultType vaultType) external view override returns (bool) {
+    function isVaultSafe(VaultType vaultType)
+        external
+        view
+        override
+        returns (bool)
+    {
         return _isVaultSafe(vaultType);
     }
 
@@ -249,7 +265,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // ── Step 1: Accumulate using the PREVIOUS observation's spot rates ────
         // This mirrors the Uniswap V2 accumulator pattern: we record the area
         // under the rate curve for the interval [lastObservation, now].
-        aaveCumulative += aaveSpotRate * elapsed;
+        aaveCumulative   += aaveSpotRate   * elapsed;
         morphoCumulative += morphoSpotRate * elapsed;
 
         // ── Step 2: Read new Aave spot rate ───────────────────────────────────
@@ -261,23 +277,30 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // This avoids the "compare to 1e6 base" flaw which conflates total accrued yield
         // with the current period rate, producing wildly inaccurate annualised figures.
         uint256 currentSharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
-        uint256 newMorphoRate = 0;
+        uint256 newMorphoRate     = 0;
 
-        if (lastMorphoSharePrice > 0 && currentSharePrice > lastMorphoSharePrice && elapsed > 0) {
+        if (
+            lastMorphoSharePrice > 0
+            && currentSharePrice > lastMorphoSharePrice
+            && elapsed > 0
+        ) {
             // Annualised rate in ray:
             // rate = (priceDelta / lastPrice) * (SECONDS_PER_YEAR / elapsed) * RAY
-            newMorphoRate =
-                (currentSharePrice - lastMorphoSharePrice) * SECONDS_PER_YEAR * RAY / lastMorphoSharePrice / elapsed;
+            newMorphoRate = (currentSharePrice - lastMorphoSharePrice)
+                * SECONDS_PER_YEAR
+                * RAY
+                / lastMorphoSharePrice
+                / elapsed;
         }
         // If share price hasn't moved or decreased (yield reversal is not possible in
         // MetaMorpho but may appear due to rounding), rate remains 0 for this interval.
 
         // ── Step 4: Store checkpoint in circular buffer ───────────────────────
         _checkpoints[_head % BUFFER_SIZE] = Checkpoint({
-            timestamp: uint32(block.timestamp),
+            timestamp:        uint32(block.timestamp),
             morphoSharePrice: uint64(currentSharePrice),
-            aaveCumulative: uint224(aaveCumulative), // intentional truncation
-            morphoCumulative: uint224(morphoCumulative) // intentional truncation
+            aaveCumulative:   uint224(aaveCumulative),    // intentional truncation
+            morphoCumulative: uint224(morphoCumulative)   // intentional truncation
         });
 
         // Advance head with explicit modulo against BUFFER_SIZE.
@@ -288,10 +311,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         if (_count < BUFFER_SIZE) _count++;
 
         // ── Step 5: Update state variables ────────────────────────────────────
-        aaveSpotRate = newAaveRate;
-        morphoSpotRate = newMorphoRate;
+        aaveSpotRate         = newAaveRate;
+        morphoSpotRate       = newMorphoRate;
         lastMorphoSharePrice = currentSharePrice;
-        lastObservationTime = block.timestamp;
+        lastObservationTime  = block.timestamp;
 
         emit ObservationRecorded(block.timestamp, newAaveRate, newMorphoRate);
     }
@@ -302,20 +325,21 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///      `currentLiquidityRate` is already annualised by Aave's interest rate model.
     function _readAaveSpotRate() internal view returns (uint256 aaveRate) {
         (
-            , // configuration
-            , // liquidityIndex
-            uint128 currentLiquidityRate,, // variableBorrowIndex
-            , // currentVariableBorrowRate
-            , // currentStableBorrowRate
-            , // lastUpdateTimestamp
-            , // id
-            , // aTokenAddress
-            , // stableDebtTokenAddress
-            , // variableDebtTokenAddress
-            , // interestRateStrategyAddress
-            , // accruedToTreasury
-            , // unbacked
-            // isolationModeTotalDebt
+            ,            // configuration
+            ,            // liquidityIndex
+            uint128 currentLiquidityRate,
+            ,            // variableBorrowIndex
+            ,            // currentVariableBorrowRate
+            ,            // currentStableBorrowRate
+            ,            // lastUpdateTimestamp
+            ,            // id
+            ,            // aTokenAddress
+            ,            // stableDebtTokenAddress
+            ,            // variableDebtTokenAddress
+            ,            // interestRateStrategyAddress
+            ,            // accruedToTreasury
+            ,            // unbacked
+                         // isolationModeTotalDebt
         ) = AAVE_POOL.getReserveData(address(USDC));
 
         aaveRate = uint256(currentLiquidityRate);
@@ -331,10 +355,14 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///
     ///      If insufficient history exists (< 1 checkpoint older than windowStart),
     ///      returns current spot rates as a conservative fallback.
-    function _computeTWAR() internal view returns (uint256 aaveTWAR, uint256 morphoTWAR) {
+    function _computeTWAR()
+        internal
+        view
+        returns (uint256 aaveTWAR, uint256 morphoTWAR)
+    {
         // Extend accumulators to current timestamp using the latest spot rates
-        uint256 elapsed = block.timestamp - lastObservationTime;
-        uint256 aaveCumNow = aaveCumulative + (aaveSpotRate * elapsed);
+        uint256 elapsed      = block.timestamp - lastObservationTime;
+        uint256 aaveCumNow   = aaveCumulative   + (aaveSpotRate   * elapsed);
         uint256 morphoCumNow = morphoCumulative + (morphoSpotRate * elapsed);
         uint256 timestampNow = block.timestamp;
 
@@ -343,14 +371,16 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             return (aaveSpotRate, morphoSpotRate);
         }
 
-        uint256 windowStart = timestampNow > TWAR_WINDOW ? timestampNow - TWAR_WINDOW : 0;
+        uint256 windowStart = timestampNow > TWAR_WINDOW
+            ? timestampNow - TWAR_WINDOW
+            : 0;
 
         // Walk the circular buffer from oldest to newest, find the oldest checkpoint
         // within or just before the windowStart boundary.
         // Buffer is ordered oldest→newest starting at (_head - _count) mod BUFFER_SIZE.
         uint8 startIdx = _count == BUFFER_SIZE
-            ? _head  // full buffer: oldest is at _head
-            : 0; // partial buffer: oldest is at index 0
+            ? _head                           // full buffer: oldest is at _head
+            : 0;                              // partial buffer: oldest is at index 0
 
         Checkpoint memory bestCheckpoint;
         bool found = false;
@@ -374,11 +404,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             }
         }
 
-        // Invariant: the loop above always sets `found = true` when `count > 0`
-        // (the early return at the top handled the `count == 0` case). Either the
-        // first branch (cp <= windowStart) fires at least once, or the else-if
-        // branch fires on the first iteration and breaks. So `found` is unreachable
-        // as `false` here. No defensive `if (!found)` check needed.
+        if (!found) {
+            return (aaveSpotRate, morphoSpotRate);
+        }
 
         uint256 dt = timestampNow - uint256(bestCheckpoint.timestamp);
         if (dt == 0) {
@@ -389,10 +417,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // Since we truncate to uint224 on storage, the true delta is:
         //   trueDelta = uint224(cumNow) - uint224(cumThen)  (wraps correctly in uint224)
         // We cast both to uint256 after the uint224 subtraction to preserve wrap semantics.
-        uint256 aaveDelta = uint224(uint224(aaveCumNow) - bestCheckpoint.aaveCumulative);
+        uint256 aaveDelta   = uint224(uint224(aaveCumNow)   - bestCheckpoint.aaveCumulative);
         uint256 morphoDelta = uint224(uint224(morphoCumNow) - bestCheckpoint.morphoCumulative);
 
-        aaveTWAR = aaveDelta / dt;
+        aaveTWAR   = aaveDelta   / dt;
         morphoTWAR = morphoDelta / dt;
     }
 
@@ -431,7 +459,8 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             // Safe if utilisation < UTILISATION_THRESHOLD_BPS
             // available / totalAToken > (10000 - threshold) / 10000
             // => available * 10000 > totalAToken * (10000 - threshold)
-            uint256 minAvailable = (totalAToken * (BPS_DENOMINATOR - UTILISATION_THRESHOLD_BPS)) / BPS_DENOMINATOR;
+            uint256 minAvailable = (totalAToken * (BPS_DENOMINATOR - UTILISATION_THRESHOLD_BPS))
+                / BPS_DENOMINATOR;
 
             return available >= minAvailable;
         } else {

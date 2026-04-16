@@ -36,9 +36,7 @@ contract DvUSDC is ERC20 {
     // ── Errors ────────────────────────────────────────────────────────────────
 
     /// @dev Reverts if any address other than VAULT_ROUTER calls mint or burn.
-    ///      The expected router is the contract's immutable `VAULT_ROUTER`; callers
-    ///      can query it directly, so the error only reports the offending caller.
-    error OnlyVaultRouter(address caller);
+    error OnlyVaultRouter(address caller, address expected);
 
     /// @dev Reverts on any transfer between two non-zero addresses.
     ///      dvUSDC is a position receipt bound to the depositing wallet; it cannot
@@ -46,21 +44,22 @@ contract DvUSDC is ERC20 {
     ///      (to == 0) are permitted.
     error NonTransferable();
 
-    /// @dev Reverts if the constructor is given the zero address for VAULT_ROUTER.
-    error ZeroRouter();
-
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param vaultRouter The DivigentVaultRouter address. Immutable after deployment.
-    constructor(address vaultRouter) ERC20("Divigent USDC", "dvUSDC") {
-        if (vaultRouter == address(0)) revert ZeroRouter();
+    constructor(address vaultRouter)
+        ERC20("Divigent USDC", "dvUSDC")
+    {
+        require(vaultRouter != address(0), "dvUSDC: zero router");
         VAULT_ROUTER = vaultRouter;
     }
 
     // ── Access Control ────────────────────────────────────────────────────────
 
     modifier onlyVaultRouter() {
-        if (msg.sender != VAULT_ROUTER) revert OnlyVaultRouter(msg.sender);
+        if (msg.sender != VAULT_ROUTER) {
+            revert OnlyVaultRouter(msg.sender, VAULT_ROUTER);
+        }
         _;
     }
 
@@ -73,7 +72,11 @@ contract DvUSDC is ERC20 {
     ///        - Transfer: from != 0 && to != 0 → REVERTS with NonTransferable()
     ///      This override preserves the VaultRouter's costBasisUSDC[wallet] invariant
     ///      by ensuring dvUSDC can never leave its originating wallet.
-    function _update(address from, address to, uint256 value) internal override {
+    function _update(
+        address from,
+        address to,
+        uint256 value
+    ) internal override {
         if (from != address(0) && to != address(0)) {
             revert NonTransferable();
         }

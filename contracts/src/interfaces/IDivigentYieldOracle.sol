@@ -7,23 +7,24 @@ pragma solidity ^0.8.20;
 interface IDivigentYieldOracle {
     // ── Types ─────────────────────────────────────────────────────────────────
 
-    enum VaultType {
-        AAVE,
-        MORPHO
-    }
+    enum VaultType { AAVE, MORPHO }
 
     struct VaultRate {
         address vault;
         VaultType vaultType;
-        uint256 spotRate; // Current rate in ray (1e27), annualised
-        uint256 twarRate; // 4-hour TWAR in ray (1e27), annualised
-        bool isSafe; // Utilisation < UTILISATION_THRESHOLD
+        uint256 spotRate;   // Current rate in ray (1e27), annualised
+        uint256 twarRate;   // 4-hour TWAR in ray (1e27), annualised
+        bool    isSafe;     // Utilisation < UTILISATION_THRESHOLD
     }
 
     // ── Events ────────────────────────────────────────────────────────────────
 
     /// @notice Emitted when a new rate observation is recorded.
-    event ObservationRecorded(uint256 indexed timestamp, uint256 aaveRate, uint256 morphoRate);
+    event ObservationRecorded(
+        uint256 indexed timestamp,
+        uint256 aaveRate,
+        uint256 morphoRate
+    );
 
     // ── View ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +33,10 @@ interface IDivigentYieldOracle {
     /// @return vault     Address of the recommended vault (Aave Pool or Morpho vault).
     /// @return vaultType Enum indicating AAVE or MORPHO.
     /// @return twarRate  The TWAR APY of the recommended vault, in ray (1e27).
-    function getOptimalVault() external view returns (address vault, VaultType vaultType, uint256 twarRate);
+    function getOptimalVault()
+        external
+        view
+        returns (address vault, VaultType vaultType, uint256 twarRate);
 
     /// @notice Returns rate data for all supported vaults.
     function getAllRates() external view returns (VaultRate[] memory rates);
