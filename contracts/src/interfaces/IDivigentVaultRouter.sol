@@ -53,6 +53,17 @@ interface IDivigentVaultRouter {
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();
 
+    /// @notice Constructor-side zero-address errors. One per dependency so the
+    ///         revert reason pinpoints the misconfigured argument.
+    error ZeroUsdc();
+    error ZeroAavePool();
+    error ZeroAToken();
+    error ZeroMorphoVault();
+    error ZeroOracle();
+    error ZeroFeeCollector();
+    error ZeroDvUsdc();
+    error ZeroEmergencyMultisig();
+
     /// @notice Reverts when neither vault can accommodate the requested deposit amount.
     ///         This may occur when Aave has insufficient available liquidity AND Morpho's
     ///         maxDeposit is below the requested amount. The depositor should retry with

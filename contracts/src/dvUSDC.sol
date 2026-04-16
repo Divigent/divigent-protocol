@@ -36,7 +36,9 @@ contract DvUSDC is ERC20 {
     // ── Errors ────────────────────────────────────────────────────────────────
 
     /// @dev Reverts if any address other than VAULT_ROUTER calls mint or burn.
-    error OnlyVaultRouter(address caller, address expected);
+    ///      The expected router is the contract's immutable `VAULT_ROUTER`; callers
+    ///      can query it directly, so the error only reports the offending caller.
+    error OnlyVaultRouter(address caller);
 
     /// @dev Reverts on any transfer between two non-zero addresses.
     ///      dvUSDC is a position receipt bound to the depositing wallet; it cannot
@@ -44,22 +46,23 @@ contract DvUSDC is ERC20 {
     ///      (to == 0) are permitted.
     error NonTransferable();
 
+    /// @dev Reverts if the constructor is given the zero address for VAULT_ROUTER.
+    error ZeroRouter();
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param vaultRouter The DivigentVaultRouter address. Immutable after deployment.
     constructor(address vaultRouter)
         ERC20("Divigent USDC", "dvUSDC")
     {
-        require(vaultRouter != address(0), "dvUSDC: zero router");
+        if (vaultRouter == address(0)) revert ZeroRouter();
         VAULT_ROUTER = vaultRouter;
     }
 
     // ── Access Control ────────────────────────────────────────────────────────
 
     modifier onlyVaultRouter() {
-        if (msg.sender != VAULT_ROUTER) {
-            revert OnlyVaultRouter(msg.sender, VAULT_ROUTER);
-        }
+        if (msg.sender != VAULT_ROUTER) revert OnlyVaultRouter(msg.sender);
         _;
     }
 

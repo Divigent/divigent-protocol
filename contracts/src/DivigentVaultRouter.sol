@@ -189,14 +189,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     )
         EIP712("DivigentVaultRouter", "1")
     {
-        require(usdc              != address(0), "Router: zero USDC");
-        require(aavePool          != address(0), "Router: zero aavePool");
-        require(aToken            != address(0), "Router: zero aToken");
-        require(morphoVault       != address(0), "Router: zero morpho");
-        require(oracle            != address(0), "Router: zero oracle");
-        require(feeCollector      != address(0), "Router: zero feeCollector");
-        require(dvUsdc            != address(0), "Router: zero dvUsdc");
-        require(emergencyMultisig != address(0), "Router: zero multisig");
+        if (usdc              == address(0)) revert ZeroUsdc();
+        if (aavePool          == address(0)) revert ZeroAavePool();
+        if (aToken            == address(0)) revert ZeroAToken();
+        if (morphoVault       == address(0)) revert ZeroMorphoVault();
+        if (oracle            == address(0)) revert ZeroOracle();
+        if (feeCollector      == address(0)) revert ZeroFeeCollector();
+        if (dvUsdc            == address(0)) revert ZeroDvUsdc();
+        if (emergencyMultisig == address(0)) revert ZeroEmergencyMultisig();
 
         USDC               = IERC20(usdc);
         AAVE_POOL          = IAaveV3Pool(aavePool);

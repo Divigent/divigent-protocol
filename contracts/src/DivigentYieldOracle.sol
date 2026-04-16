@@ -143,6 +143,15 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///         Initialised in the constructor with the vault's current share price.
     uint256 public lastMorphoSharePrice;
 
+    // ── Errors ────────────────────────────────────────────────────────────────
+
+    /// @dev Constructor-side zero-address errors. One per dependency so the
+    ///      revert reason pinpoints the misconfigured argument.
+    error ZeroAavePool();
+    error ZeroAToken();
+    error ZeroUsdc();
+    error ZeroMorphoVault();
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param aavePool    Aave V3 Pool address on Base.
@@ -155,10 +164,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         address usdc,
         address morphoVault
     ) {
-        require(aavePool    != address(0), "Oracle: zero aavePool");
-        require(aToken      != address(0), "Oracle: zero aToken");
-        require(usdc        != address(0), "Oracle: zero usdc");
-        require(morphoVault != address(0), "Oracle: zero morphoVault");
+        if (aavePool    == address(0)) revert ZeroAavePool();
+        if (aToken      == address(0)) revert ZeroAToken();
+        if (usdc        == address(0)) revert ZeroUsdc();
+        if (morphoVault == address(0)) revert ZeroMorphoVault();
 
         AAVE_POOL    = IAaveV3Pool(aavePool);
         A_TOKEN      = IERC20(aToken);
