@@ -422,12 +422,15 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             return (aaveSpotRate, morphoSpotRate);
         }
 
-        // Compute TWAR from cumulative delta, handling uint224 truncation correctly.
-        // Truncated to uint224 on storage, so the true delta is:
-        //   trueDelta = uint224(cumNow) - uint224(cumThen)  (wraps correctly in uint224)
-        // We cast both to uint256 after the uint224 subtraction to preserve wrap semantics.
-        uint256 aaveDelta   = uint224(uint224(aaveCumNow)   - bestCheckpoint.aaveCumulative);
-        uint256 morphoDelta = uint224(uint224(morphoCumNow) - bestCheckpoint.morphoCumulative);
+        // Compute TWAR from cumulative delta. Cumulatives are stored as uint224
+        // and intentionally overflow (Uniswap V2 pattern). The subtraction must
+        // be unchecked so Solidity 0.8.x wraps instead of reverting on underflow.
+        uint256 aaveDelta;
+        uint256 morphoDelta;
+        unchecked {
+            aaveDelta   = uint256(uint224(aaveCumNow)   - bestCheckpoint.aaveCumulative);
+            morphoDelta = uint256(uint224(morphoCumNow) - bestCheckpoint.morphoCumulative);
+        }
 
         aaveTWAR   = aaveDelta   / dt;
         morphoTWAR = morphoDelta / dt;

@@ -214,6 +214,112 @@ contract DivigentVaultRouterTest is Test {
         assertEq(shares, 0);
     }
 
+    /// @dev previewWithdrawNet must not under-deliver when the vault is in drawdown.
+    ///      Guarantee: actualOut >= desiredNetUSDC (or capped at walletShares).
+    ///      The closed-form solver assumes yield = gross - principalOut unconditionally
+    ///      and treats negative yield as a fee rebate, inflating what each share returns.
+    ///      In reality withdraw() floors yield at 0 (no negative fee), so the preview
+    ///      solves for too few shares in a loss state.
+    function test_previewWithdrawNet_lossScenario_violatesGuarantee() public {
+        uint256 depositAmount = 1_000e6; // 1000 USDC
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // Simulate a 10% drawdown in the Aave leg (gross < principalOut for alice)
+        aToken.burn(address(router), 100e6);
+        assertEq(router.totalVaultAssets(), 900e6, "Post-loss vault total");
+
+        uint256 desiredNet = 100e6; // want 100 USDC net
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        // Sanity: not capped at walletShares (so the guarantee must hold)
+        uint256 walletShares = dvUsdc.balanceOf(alice);
+        assertLt(predictedShares, walletShares, "Not the cap case");
+
+        // Execute the actual withdraw
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        // The core promise: user receives at least desiredNet (allow 1 wei floor tolerance)
+        assertGe(actualOut, desiredNet - 1, "loss: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev previewWithdrawNet must handle a huge desiredNet relative to tiny position
+    ///      by capping at walletShares without reverting.
+    function test_previewWithdrawNet_tinyShares_hugeDesired() public {
+        uint256 depositAmount = MIN_DEPOSIT; // 10 USDC
+        _deposit(alice, alice, depositAmount);
+
+        uint256 walletShares = dvUsdc.balanceOf(alice);
+
+        // Ask for astronomical net (inside uint128.max to avoid input-overflow revert)
+        uint256 huge = type(uint128).max;
+        uint256 predicted = router.previewWithdrawNet(huge, alice);
+
+        assertEq(predicted, walletShares, "Preview caps at walletShares");
+    }
+
+    /// @dev Fuzz invariant: for any valid (depositAmount, yield/loss, desiredNet),
+    ///      the shares returned by previewWithdrawNet must, when fed into the actual
+    ///      withdraw flow, deliver at least desiredNet (or hit the walletShares cap).
+    function testFuzz_previewWithdrawNet_withdrawYieldsAtLeastDesired(
+        uint128 depositAmount_,
+        int16 yieldBps_,
+        uint128 desiredNet_
+    ) public {
+        uint256 depositAmount = bound(uint256(depositAmount_), MIN_DEPOSIT, 100_000e6);
+        // yieldBps in [-3000, +3000] bps ⇒ -30% drawdown to +30% gain
+        int256 yieldBps = int256(bound(int256(yieldBps_), -3000, 3000));
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        // Apply yield/loss
+        if (yieldBps > 0) {
+            uint256 gain = (depositAmount * uint256(yieldBps)) / BPS_DENOM;
+            aToken.mint(address(router), gain);
+        } else if (yieldBps < 0) {
+            uint256 loss = (depositAmount * uint256(-yieldBps)) / BPS_DENOM;
+            aToken.burn(address(router), loss);
+        }
+
+        // desiredNet bounded by what's realistically withdrawable
+        uint256 positionValue = router.previewRedeem(shares, alice);
+        if (positionValue == 0) return;
+        uint256 desired = bound(uint256(desiredNet_), 1, positionValue);
+
+        uint256 predictedShares = router.previewWithdrawNet(desired, alice);
+        if (predictedShares == 0) return;
+
+        // If capped, the guarantee is relaxed (user opted for max withdrawal)
+        if (predictedShares == dvUsdc.balanceOf(alice)) return;
+
+        uint256 actualOut = router.previewRedeem(predictedShares, alice);
+
+        // Allow 1 wei floor-drift tolerance; anything worse is a real violation
+        assertGe(actualOut + 1, desired, "actualOut < desired - 1 wei (preview underestimated)");
+    }
+
+    /// @dev Dust-position edge: when the vault's value per share floors to 0
+    ///      (walletShares * A1 / S1 == 0 via Floor rounding), the loss branch
+    ///      would otherwise return shares capped at walletShares that then
+    ///      deliver 0 USDC — violating the >= desiredNet guarantee silently.
+    ///      The preview must return 0 in this degenerate state.
+    function test_previewWithdrawNet_grossAllZero_returnsZero() public {
+        uint256 depositAmount = 1_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // Total vault wipeout: A1 = 0 + 1 = 1, while S1 = 1_000e6 + 1
+        // → grossAll = floor(1_000e6 · 1 / (1_000e6 + 1)) = 0
+        aToken.burn(address(router), depositAmount);
+        assertEq(router.totalVaultAssets(), 0, "Vault must be wiped to hit grossAll=0");
+
+        // Any positive desired is unserviceable; preview must signal via 0
+        uint256 shares = router.previewWithdrawNet(1e6, alice);
+        assertEq(shares, 0, "grossAll=0 must short-circuit to 0 shares");
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  2. Stale oracle blocks deposits
     // ─────────────────────────────────────────────────────────────────────────

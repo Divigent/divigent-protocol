@@ -20,9 +20,8 @@ import {BaseAddresses} from "./BaseAddresses.sol";
 ///
 ///         Pattern: deploy OUR code fresh, use THEIR code live.
 abstract contract ForkBase is Test, BaseAddresses {
-    // Pick a recent Base block for reproducibility.
-    // Update this when protocols upgrade or you need fresh state.
-    uint256 internal constant FORK_BLOCK = 30_000_000;
+    // Pinned Base mainnet block for reproducibility (April 18, 2026).
+    uint256 internal constant FORK_BLOCK = 44_870_973;
 
     // ── Divigent contracts (deployed fresh on the fork) ──────────────────────
     DivigentVaultRouter internal router;

@@ -59,6 +59,7 @@ interface IDivigentVaultRouter {
     error NotAuthorised();
     error DepositsPausedError();
     error ZeroAmount();
+    error ZeroAddress();
     error TVLCapExceeded(uint256 requested, uint256 cap);
     error InsufficientShares(uint256 requested, uint256 available);
     error NotEmergencyMultisig();
