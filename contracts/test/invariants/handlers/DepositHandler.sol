@@ -9,7 +9,7 @@ import {MockERC20} from "../../mocks/MockERC20.sol";
 
 /// @title DepositHandler
 /// @notice Performs bounded random deposits from a pool of actors.
-///         Maple-style: handler is targeted by the fuzzer; it calls
+///         Handler is targeted by the fuzzer; it calls
 ///         protocol functions with constrained random inputs.
 contract DepositHandler is CommonBase, StdUtils {
     DivigentVaultRouter public router;

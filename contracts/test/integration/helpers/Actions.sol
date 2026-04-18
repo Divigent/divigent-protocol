@@ -271,7 +271,7 @@ abstract contract Actions is RouterIntegrationBase {
 
     // ═══════════════════════════════════════════════════════════════════════
     // Struct equality — field-by-field assertEq with precise failure messages
-    // (Aave V4-style: one assert on the whole snap, diagnostics point at the
+    // (one assert on the whole snap, diagnostics point at the
     //  specific field that diverged)
     // ═══════════════════════════════════════════════════════════════════════
 

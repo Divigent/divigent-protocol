@@ -6,7 +6,7 @@ import {IDivigentVaultRouter} from "../../../../src/interfaces/IDivigentVaultRou
 
 /// @title  Withdraw — Validation Suite
 /// @notice Systematically enumerates every revert path for `withdraw`.
-///         Aave V4-style: one file per operation, one test per revert reason,
+///         one file per operation, one test per revert reason,
 ///         named `test_withdraw_revertsWith_<Error>_when_<cause>`.
 ///
 ///         Revert map (per `DivigentVaultRouter.withdraw`):

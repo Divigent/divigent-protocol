@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /// @title  BaseAddresses — Base Mainnet contract registry
-/// @notice Maple-style address constants for fork tests. All addresses verified
+/// @notice address constants for fork tests. All addresses verified
 ///         on basescan.org. Inherit this contract to get typed constants at zero
 ///         runtime cost.
 abstract contract BaseAddresses {

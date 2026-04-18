@@ -12,7 +12,7 @@ import {AdminHandler} from "./handlers/AdminHandler.sol";
 import {OperatorHandler} from "./handlers/OperatorHandler.sol";
 
 /// @title  InvariantTest
-/// @notice Maple-style handler-based invariant suite. 24 invariants across
+/// @notice Handler-based invariant suite. 24 invariants across
 ///         5 components, asserted after every random fuzzer action.
 ///
 ///         Run:  forge test --match-contract InvariantTest -vv

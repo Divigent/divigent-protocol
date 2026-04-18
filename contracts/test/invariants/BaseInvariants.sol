@@ -17,11 +17,10 @@ import {OperatorHandler} from "./handlers/OperatorHandler.sol";
 
 /// @title  BaseInvariants
 /// @author Divigent Protocol
-/// @notice Maple-style invariant assertion suite. 30 invariant checks organised
+/// @notice Invariant assertion suite. 30 invariant checks organised
 ///         by protocol component. Called by Invariants.t.sol after every fuzzer
 ///         action.
 ///
-///         Structure mirrors maple-core-v2/tests/invariants/BaseInvariants.t.sol:
 ///           - One assert function per invariant
 ///           - Organised by component (VaultRouter, dvUSDC, FeeCollector, Oracle, Accounting)
 ///           - Handler references for aggregate accounting checks
@@ -449,7 +448,6 @@ abstract contract BaseInvariants is Test {
     // ════════════════════════════════════════════════════════════════════════════
     //  ACCOUNTING INVARIANTS (3)
     //  These compare on-chain state against handler-tracked off-chain counters.
-    //  Maple uses this pattern to detect state leaks invisible to pure on-chain checks.
     // ════════════════════════════════════════════════════════════════════════════
 
     /// @notice Accounting-A: Fees bounded by yield

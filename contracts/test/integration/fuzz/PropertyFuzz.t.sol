@@ -5,7 +5,7 @@ import {Actions} from "../helpers/Actions.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title  Property Fuzz Suite
-/// @notice One property per function, Aave V4 style: `test_<op>_fuzz_<property>`.
+/// @notice One property per function: `test_<op>_fuzz_<property>`.
 ///         Bounds are semantic (MIN_AMOUNT, MAX_DEPOSIT, MAX_YIELD), not type
 ///         limits, so the fuzzer spends its runs on realistic inputs.
 ///
@@ -215,7 +215,7 @@ contract PropertyFuzzTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Boundary-failure fuzz (Aave V4 pattern: fuzz the revert paths too)
+    // Boundary-failure fuzz (fuzz the revert paths too)
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @notice Withdraw with minOut above the realisable gross must always

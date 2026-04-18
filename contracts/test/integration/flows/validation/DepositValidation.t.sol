@@ -6,7 +6,7 @@ import {IDivigentVaultRouter} from "../../../../src/interfaces/IDivigentVaultRou
 
 /// @title  Deposit — Validation Suite
 /// @notice Systematically enumerates every revert path for `deposit` and
-///         `depositWithPermit`. Aave V4-style: one file per operation, one test
+///         `depositWithPermit` one file per operation, one test
 ///         per revert reason, named `test_<fn>_revertsWith_<Error>_when_<cause>`.
 ///
 ///         Purpose: any new reviewer (or audit firm) can open this file and see,
