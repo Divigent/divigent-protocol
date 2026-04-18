@@ -865,25 +865,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     }
 
     // ── Internal: Morpho Reads ────────────────────────────────────────────────
-    //
-    // Two variants, deliberately kept separate, never mixed:
-    //
-    //   1. `_morphoAssetsHeld`  — VALUATION-STRICT.
-    //      Direct call; any Morpho revert bubbles up and reverts the whole tx.
-    //      Used by `totalVaultAssets`, `pricePerShare`, and every call that
-    //      feeds the share-math denominator. Silent zero here would understate
-    //      the pool and over-mint shares on the next deposit.
-    //
-    //   2. `_safeMorphoMaxWithdraw` — ROUTING-SAFE.
-    //      Wrapped in try/catch; returns 0 on any failure. Used only for
-    //      deciding how to allocate a withdrawal across vaults (capacity check,
-    //      shortfall redirect). Treats a Morpho hiccup as "Morpho unavailable,
-    //      route around it" rather than cascading into a router-wide DoS.
-    //
-    // Do not use `_safeMorphoMaxWithdraw` inside any function that shapes share
-    // minting/burning amounts.
 
-    /// @dev VALUATION-STRICT. Returns the USDC value of Morpho shares held by
+    /// @dev Returns the USDC value of Morpho shares held by
     ///      this contract. Fails loud on any Morpho read failure — intentional.
     function _morphoAssetsHeld() internal view returns (uint256) {
         uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
@@ -891,7 +874,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         return MORPHO_VAULT.convertToAssets(morphoShares);
     }
 
-    /// @dev ROUTING-SAFE. Returns Morpho's effective `maxWithdraw` for this
+    /// @dev Returns Morpho's effective `maxWithdraw` for this
     ///      contract, or 0 if the view reverts. Used only for withdraw capacity
     ///      planning and oracle-side routing decisions. NEVER use in valuation.
     function _safeMorphoMaxWithdraw() internal view returns (uint256) {
