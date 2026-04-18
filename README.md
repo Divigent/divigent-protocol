@@ -95,13 +95,13 @@ contracts/
 │   │   │   └── validation/          Revert-path enumeration (deposit, withdraw)
 │   │   ├── fuzz/                    Property-based fuzz tests
 │   │   └── helpers/                 Actions.sol test DSL
-│   ├── invariants/                  Maple-style handler-based invariant suite (30 invariants, 5 handlers)
+│   ├── invariants/                  handler-based invariant suite (30 invariants, 5 handlers)
 │   ├── fork/                        Base mainnet fork tests (real Aave V3 + Morpho Steakhouse)
 │   └── echidna/                     Echidna/Medusa assertion harness
 ├── script/
 │   ├── DeployBase.s.sol             Production deployment (Base mainnet)
 │   └── DeployBaseSepolia.s.sol      Testnet deployment (Base Sepolia)
-├── snapshots/                       Gas snapshots (Aave V4 pattern)
+├── snapshots/                       Gas snapshots
 ├── foundry.toml
 └── Makefile
 ```

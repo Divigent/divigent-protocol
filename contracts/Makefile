@@ -99,7 +99,7 @@ help:
 	@echo "    make test-gas           Gas report on fork tests"
 	@echo ""
 	@echo "  Specific Suites"
-	@echo "    make test-invariants    30 Maple-style invariant tests"
+	@echo "    make test-invariants    30 invariant tests"
 	@echo "    make test-fuzz          Solvency fuzz tests"
 	@echo "    make test-integration   Integration flow tests"
 	@echo ""
