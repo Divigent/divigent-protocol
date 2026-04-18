@@ -1,0 +1,10 @@
+{
+  "mint": "68126",
+  "burn": "27260",
+  "transfer (reverts)": "22107",
+  "transferFrom (reverts)": "24842",
+  "approve": "45947",
+  "balanceOf": "2552",
+  "totalSupply": "2315",
+  "decimals": "253"
+}

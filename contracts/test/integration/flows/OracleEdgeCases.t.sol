@@ -5,7 +5,7 @@ import {Actions} from "../helpers/Actions.sol";
 import {IDivigentYieldOracle} from "../../../src/interfaces/IDivigentYieldOracle.sol";
 import {DivigentYieldOracle} from "../../../src/DivigentYieldOracle.sol";
 
-/// @title  Oracle Adverse / Unusual Conditions -- End-to-End Flows
+/// @title  Oracle Edge Cases End-to-End Flows
 /// @notice Stresses the oracle's behaviour under edge conditions that rarely fire
 ///         in normal operation but are the ones auditors worry about:
 ///
@@ -17,9 +17,9 @@ import {DivigentYieldOracle} from "../../../src/DivigentYieldOracle.sol";
 ///         Each test is a self-contained journey against the REAL oracle (not
 ///         MockOracle). We use a dedicated test contract that wires up a fresh
 ///         stack with `DivigentYieldOracle`, so the oracle logic is actually
-///         exercised -- not short-circuited by the mock.
-contract OracleAdverseConditionsFlowTest is Actions {
-    // Real oracle override -- we deploy our own and point router tests at it
+///         exercised: not short-circuited by the mock.
+contract OracleEdgeCasesTest is Actions {
+    // Real oracle override: deploys a fresh oracle and points tests at it
     // indirectly via the oracle's read surface (TWAR, safety, routing).
     DivigentYieldOracle internal realOracle;
 
@@ -31,7 +31,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. Flat Morpho share-price -- Morpho TWAR stays 0, routing stays on Aave
+    // 1. Flat Morpho share-price: Morpho TWAR stays 0, routing stays on Aave
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_oracleAdverse_flatMorphoPrice_keepsMorphoTwarAtZero() public {
@@ -42,7 +42,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
 
         // Record 48 observations (a full TWAR window) with flat Morpho price.
         for (uint256 i = 0; i < 48; i++) {
-            morphoVault.setSharePrice(1_000_000); // flat -- no yield in Morpho
+            morphoVault.setSharePrice(1_000_000); // flat: no yield in Morpho
             skip(interval);
             realOracle.recordObservation();
         }
@@ -52,10 +52,10 @@ contract OracleAdverseConditionsFlowTest is Actions {
 
         IDivigentYieldOracle.VaultRate[] memory rates = realOracle.getAllRates();
 
-        // Aave TWAR should be the rate we set, within 1 wei.
+        // Aave TWAR should match the configured rate, within 1 wei.
         assertApproxEqAbs(rates[0].twarRate, 5e25, 1, "Aave TWAR == flat rate (5%)");
 
-        // Morpho TWAR MUST be exactly zero -- no share-price delta means no
+        // Morpho TWAR MUST be exactly zero: no share-price delta means no
         // per-interval rate, and a flat accumulator can't synthesise one.
         assertEq(rates[1].twarRate, 0, "Morpho TWAR is exactly zero under flat share price");
 
@@ -65,7 +65,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. Decreasing Morpho share-price -- rate clamps to 0, vault flagged unsafe
+    // 2. Decreasing Morpho share-price: rate clamps to 0, vault flagged unsafe
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_oracleAdverse_decreasingMorphoPrice_rateClampedToZero_morphoUnsafe() public {
@@ -89,7 +89,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
             skip(interval);
             realOracle.recordObservation();
 
-            // Spot rate must never go negative -- the rate field is uint256 and
+            // Spot rate must never go negative: the rate field is uint256 and
             // negative deltas are explicitly clamped to zero inside
             // `recordObservation` (the `currentSharePrice > lastMorphoSharePrice_`
             // guard).
@@ -98,17 +98,17 @@ contract OracleAdverseConditionsFlowTest is Actions {
             );
         }
 
-        // Morpho TWAR should also be zero -- cumulator never increased over
+        // Morpho TWAR should also be zero: cumulator never increased over
         // this stretch.
         skip(interval);
         IDivigentYieldOracle.VaultRate[] memory rates = realOracle.getAllRates();
         assertEq(rates[1].twarRate, 0, "Morpho TWAR == 0 over a stretch of non-increasing prices");
 
         // `isVaultSafe(MORPHO)` uses the CURRENT price, not TWAR. Current price
-        // is 997_000 < SHARE_UNIT (1_000_000), so Morpho is unsafe.
+        // is 997_000 < 1_000_000 (1 USDC), so Morpho is unsafe.
         assertFalse(
             realOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO),
-            "Morpho flagged unsafe when current share price < SHARE_UNIT"
+            "Morpho flagged unsafe when share price < 1 USDC"
         );
 
         // Routing must go to Aave regardless of what TWARs say.
@@ -117,7 +117,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Sparse observations -- hourly vs 5-min, TWAR still converges
+    // 3. Sparse observations: hourly vs 5-min, TWAR still converges
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_oracleAdverse_sparseHourlyObservations_twarStillComputes() public {
@@ -147,7 +147,7 @@ contract OracleAdverseConditionsFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 4. Window-boundary behaviour -- observation at exactly windowStart
+    // 4. Window-boundary behaviour: observation at exactly windowStart
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev When the walk finds a checkpoint whose timestamp equals `windowStart`

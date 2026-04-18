@@ -377,6 +377,11 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         DV_USDC.burn(wallet, shares);
 
         // ── Step 3: Redeem from vaults (exact-asset semantics) ────────────────
+        // Snapshot USDC balance BEFORE vault redemptions. Any stray USDC already
+        // in the router (accidental transfer, rounding dust) is excluded from
+        // the yield calculation by measuring the delta, not the absolute balance.
+        uint256 balanceBefore = USDC.balanceOf(address(this));
+
         // Determine how much USDC to pull from each vault proportionally.
         uint256 aaveBalance   = A_TOKEN.balanceOf(address(this));
         uint256 morphoBalance = _morphoAssetsHeld();
@@ -390,40 +395,95 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         uint256 totalSupply_  = DV_USDC.totalSupply() + shares; // restore pre-burn supply
         uint256 grossUSDC     = _sharesToAssets(shares, totalAssets_, totalSupply_);
 
-        uint256 fromAave   = 0;
-        uint256 fromMorpho = 0;
-
+        // ── Plan: proportional target ─────────────────────────────────────────
+        // The initial target is proportional to each vault's share of totalHeld.
+        // If one leg is constrained, the shortfall redirects to the other.
+        uint256 targetAave;
+        uint256 targetMorpho;
         if (aaveBalance > 0 && morphoBalance == 0) {
-            fromAave = grossUSDC;
+            targetAave   = grossUSDC;
+            targetMorpho = 0;
         } else if (morphoBalance > 0 && aaveBalance == 0) {
-            fromMorpho = grossUSDC;
+            targetAave   = 0;
+            targetMorpho = grossUSDC;
         } else {
-            // Split proportionally between vaults
-            fromAave   = (grossUSDC * aaveBalance)   / totalHeld;
-            fromMorpho = grossUSDC - fromAave;         // remainder to Morpho
+            targetAave   = (grossUSDC * aaveBalance) / totalHeld;
+            targetMorpho = grossUSDC - targetAave;
         }
 
-        // Redeem from Aave (exact USDC amount)
+        // ── Capacity: what each vault can actually pay right now ─────────────
+        // Aave: the router holds `aaveBalance` of aTokens, but a V3 withdrawal
+        // can only return as much USDC as sits idle in the aToken contract.
+        // Morpho: wrapped in try/catch so a view hiccup becomes "unavailable"
+        // (0) rather than a hard revert. Additionally capped at our actual
+        // holdings. A misbehaving vault could report an unreasonably high
+        // maxWithdraw; capping at actual holdings prevents over-withdrawal.
+        uint256 aaveIdle  = USDC.balanceOf(address(A_TOKEN));
+        uint256 aaveCap   = aaveBalance < aaveIdle ? aaveBalance : aaveIdle;
+        uint256 morphoCap = _safeMorphoMaxWithdraw();
+        if (morphoCap > morphoBalance) morphoCap = morphoBalance;
+
+        // Early revert when no combination of the two can serve the ask.
+        if (aaveCap + morphoCap < grossUSDC) {
+            revert InsufficientVaultLiquidity(grossUSDC, aaveCap + morphoCap);
+        }
+
+        // ── Redirect: if one leg is short, shift its slack to the other ──────
+        // After the early-revert above, at most ONE leg can be short. Proof:
+        // if both were short, targetAave + targetMorpho > aaveCap + morphoCap,
+        // but targetAave + targetMorpho == grossUSDC, so
+        // grossUSDC > aaveCap + morphoCap — the early-revert case. Therefore a
+        // single redirect suffices; no loop is required.
+        uint256 fromAave;
+        uint256 fromMorpho;
+        bool    redirected;
+        bool    shortLegMorpho;
+        if (targetAave > aaveCap) {
+            fromAave        = aaveCap;
+            fromMorpho      = grossUSDC - aaveCap;
+            redirected      = true;
+            shortLegMorpho  = false;
+        } else if (targetMorpho > morphoCap) {
+            fromMorpho      = morphoCap;
+            fromAave        = grossUSDC - morphoCap;
+            redirected      = true;
+            shortLegMorpho  = true;
+        } else {
+            fromAave   = targetAave;
+            fromMorpho = targetMorpho;
+        }
+
+        // ── Execute: pull from each vault ────────────────────────────────────
+        // We intentionally DO NOT wrap the mutating Morpho call in try/catch.
+        // If Morpho's view said it could serve `fromMorpho` but the mutating
+        // call reverts (intra-block state change, liquidity race, or a hostile
+        // vault implementation reentering), the revert propagates.
+        // The reentrancy guard relies on this bubble-up, and plan/execute
+        // capacity drift is rare enough that a simple retry is acceptable.
         if (fromAave > 0) {
-            // Withdraw exactly fromAave USDC from Aave; USDC arrives in this contract
             AAVE_POOL.withdraw(address(USDC), fromAave, address(this));
         }
-
-        // Redeem from Morpho (exact-asset semantics via ERC-4626 withdraw)
-        // Using withdraw(assets, receiver, owner) instead of convertToShares + redeem:
-        //   - Eliminates share-rounding risk: convertToShares rounds down, causing the
-        //     redeemed USDC to be slightly less than requested (dust left in vault).
-        //   - ERC-4626 withdraw() burns however many shares are needed to deliver
-        //     exactly `fromMorpho` USDC to the receiver, or reverts if insufficient.
         if (fromMorpho > 0) {
+            // ERC-4626 `withdraw(assets, receiver, owner)`: exact-asset semantics.
+            // Using withdraw() over redeem() avoids share-rounding leaving dust.
             MORPHO_VAULT.withdraw(fromMorpho, address(this), address(this));
         }
 
+        if (redirected) {
+            emit ExitRedirected(wallet, targetAave, targetMorpho, fromAave, fromMorpho, shortLegMorpho);
+        }
+
         // ── Step 4: Compute fee from actual received USDC ─────────────────────
-        // [INV-4] At this point: USDC.balanceOf(this) == actualGross (from vault redemptions)
-        // Measure what actually arrived — Morpho may deliver slightly more or less than
-        // requested due to interest accrual between the split calculation and redemption.
-        uint256 actualGross  = USDC.balanceOf(address(this));
+        // Measure the DELTA: what the vaults delivered in THIS transaction.
+        // Using the delta (not absolute balance) ensures stray USDC that was
+        // already in the router is excluded from yield and fee calculation.
+        uint256 actualGross  = USDC.balanceOf(address(this)) - balanceBefore;
+
+        // Guard: if vault redemptions silently returned 0 (protocol bug, not a
+        // revert), stop here rather than burning dvUSDC for nothing. See
+        // test/SilentFailure.t.sol for the proof that this is exploitable without
+        // this check.
+        if (actualGross == 0) revert InsufficientVaultLiquidity(grossUSDC, 0);
 
         // Recompute yield from actual gross; floor at 0 — principal is never negative yield
         uint256 actualYield  = actualGross > principalOut ? actualGross - principalOut : 0;
@@ -442,7 +502,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         }
 
         // Transfer net USDC to wallet
-        // [INV-4] After this: USDC.balanceOf(this) == 0
+        // [INV-4] After this: USDC.balanceOf(this) == balanceBefore (stray USDC preserved)
         USDC.safeTransfer(wallet, usdcReturned);
 
         emit Withdrawn(wallet, shares, usdcReturned, actualYield, feeAmount);
@@ -704,7 +764,15 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
             return USDC.balanceOf(address(A_TOKEN)) >= amount;
         } else {
-            return MORPHO_VAULT.maxDeposit(address(this)) >= amount;
+            // ROUTING-SAFE: a Morpho view revert (pause, unexpected state) is
+            // treated as "Morpho unavailable, don't route here" rather than
+            // cascading into a deposit-wide revert. Deposits then fall through
+            // to the Aave branch by the caller's retry logic.
+            try MORPHO_VAULT.maxDeposit(address(this)) returns (uint256 cap) {
+                return cap >= amount;
+            } catch {
+                return false;
+            }
         }
     }
 
@@ -796,13 +864,41 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         emit Deposited(wallet, amount, dvUsdcMinted, vaultType);
     }
 
-    // ── Internal: Morpho Balance ──────────────────────────────────────────────
+    // ── Internal: Morpho Reads ────────────────────────────────────────────────
+    //
+    // Two variants, deliberately kept separate, never mixed:
+    //
+    //   1. `_morphoAssetsHeld`  — VALUATION-STRICT.
+    //      Direct call; any Morpho revert bubbles up and reverts the whole tx.
+    //      Used by `totalVaultAssets`, `pricePerShare`, and every call that
+    //      feeds the share-math denominator. Silent zero here would understate
+    //      the pool and over-mint shares on the next deposit.
+    //
+    //   2. `_safeMorphoMaxWithdraw` — ROUTING-SAFE.
+    //      Wrapped in try/catch; returns 0 on any failure. Used only for
+    //      deciding how to allocate a withdrawal across vaults (capacity check,
+    //      shortfall redirect). Treats a Morpho hiccup as "Morpho unavailable,
+    //      route around it" rather than cascading into a router-wide DoS.
+    //
+    // Do not use `_safeMorphoMaxWithdraw` inside any function that shapes share
+    // minting/burning amounts.
 
-    /// @dev Returns the USDC value of Morpho shares held by this contract.
-    ///      Uses the vault's convertToAssets() which accounts for accrued yield.
+    /// @dev VALUATION-STRICT. Returns the USDC value of Morpho shares held by
+    ///      this contract. Fails loud on any Morpho read failure — intentional.
     function _morphoAssetsHeld() internal view returns (uint256) {
         uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
         if (morphoShares == 0) return 0;
         return MORPHO_VAULT.convertToAssets(morphoShares);
+    }
+
+    /// @dev ROUTING-SAFE. Returns Morpho's effective `maxWithdraw` for this
+    ///      contract, or 0 if the view reverts. Used only for withdraw capacity
+    ///      planning and oracle-side routing decisions. NEVER use in valuation.
+    function _safeMorphoMaxWithdraw() internal view returns (uint256) {
+        try MORPHO_VAULT.maxWithdraw(address(this)) returns (uint256 m) {
+            return m;
+        } catch {
+            return 0;
+        }
     }
 }

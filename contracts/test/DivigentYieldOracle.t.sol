@@ -246,7 +246,7 @@ contract DivigentYieldOracleTest is TestBase {
         uint128 highRate = 10e25;
 
         // Record 208 observations first. This gets us close to the uint8 wrap point
-        // without affecting the final 48-observation window we actually care about.
+        // without affecting the final 48-observation window under test.
         for (uint256 i = 0; i < 208; i++) {
             _recordObservationAfter(elapsed, lowRate, 1_000_000);
         }
@@ -257,7 +257,7 @@ contract DivigentYieldOracleTest is TestBase {
         }
 
         // Fill the last 16 observations of the final 48-slot window with the high rate.
-        // At this point we have recorded 256 total observations, so `_head` as a uint8
+        // At this point 256 total observations have been recorded, so `_head` as a uint8
         // has wrapped back to 0 even though the logical ring-buffer position is 256 % 48 = 16.
         for (uint256 i = 0; i < 16; i++) {
             _recordObservationAfter(elapsed, highRate, 1_000_000);
@@ -330,12 +330,14 @@ contract DivigentYieldOracleTest is TestBase {
     }
 
     function test_isVaultSafe_morphoBelowParIsUnsafe() public {
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT() - 1);
+        // Share price below 1 USDC (999_999 < 1e6)
+        morphoVault.setSharePrice(999_999);
         assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Morpho below par should be unsafe");
     }
 
     function test_isVaultSafe_morphoAboveParIsSafe() public {
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT() + 1);
+        // Share price above 1 USDC (1_000_001 > 1e6)
+        morphoVault.setSharePrice(1_000_001);
         assertTrue(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Morpho above par should be safe");
     }
 
@@ -398,7 +400,7 @@ contract DivigentYieldOracleTest is TestBase {
         vm.assume(elapsed <= 30 days);
         vm.assume(aaveRate > 0);
 
-        _recordObservationAfter(elapsed, aaveRate, yieldOracle.SHARE_UNIT() - 1);
+        _recordObservationAfter(elapsed, aaveRate, 999_999);
 
         (address vault, IDivigentYieldOracle.VaultType vaultType,) = yieldOracle.getOptimalVault();
 
@@ -654,8 +656,8 @@ contract DivigentYieldOracleTest is TestBase {
     function test_getOptimalVault_returnsAaveEvenWhenBothVaultsUnsafe() public {
         // Aave at >90% utilization (unsafe per oracle heuristic)
         _setAaveUtilization(100e6, 5e6); // only 5% available
-        // Morpho below par (unsafe)
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT() - 1);
+        // Morpho share price below 1 USDC (unsafe)
+        morphoVault.setSharePrice(999_999);
 
         (address vault, IDivigentYieldOracle.VaultType vaultType,) = yieldOracle.getOptimalVault();
 
@@ -715,8 +717,8 @@ contract DivigentYieldOracleTest is TestBase {
         _recordObservationAfter(interval, 0.01e27, 1_050_000);
         vm.warp(block.timestamp + interval);
 
-        // Now set Morpho below par (unsafe)
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT() - 1);
+        // Set Morpho share price below 1 USDC (unsafe)
+        morphoVault.setSharePrice(999_999);
 
         (address vault,,) = yieldOracle.getOptimalVault();
         assertEq(vault, address(aavePool), "Unsafe Morpho loses even with higher TWAR");
@@ -836,11 +838,10 @@ contract DivigentYieldOracleTest is TestBase {
     // Audit: Morpho rate truncation at low SHARE_UNIT precision
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @dev At 5% APY, >50% of observations produce morphoSpotRate=0 due to
-    ///      integer truncation, but the TWAR self-corrects via inflated spikes
-    ///      on the intervals where the price DOES tick. Finding is overstated
-    ///      at moderate APYs.
-    function test_audit_truncationAt5PctAPY_selfCorrects() public {
+    /// @dev With SHARE_UNIT = 1e18, per-interval share price deltas no longer
+    ///      truncate to 0 at realistic APYs. The 1e12 extra precision (vs 1e6)
+    ///      resolves the truncation concern entirely.
+    function test_audit_noTruncationAt5PctAPY_withShareUnit1e18() public {
         uint256 SU = yieldOracle.SHARE_UNIT();
         uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
@@ -848,30 +849,26 @@ contract DivigentYieldOracleTest is TestBase {
         uint128 aaveRate = 0.03e27; // 3%
         uint256 morphoBps = 500; // 5%
 
-        // Per-interval delta truncates to 0
+        // Per-interval delta is now non-zero with 1e18 precision
         uint256 rawDelta = (SU * morphoBps * interval) / (10_000 * SPY);
-        assertEq(rawDelta, 0, "per-interval delta truncates to 0");
+        assertGt(rawDelta, 0, "1e18 SHARE_UNIT prevents per-interval truncation");
 
-        uint256 zeroCount;
         for (uint256 i = 1; i <= 48; i++) {
             uint256 growth = (SU * morphoBps * (i * interval)) / (10_000 * SPY);
             _recordObservationAfter(interval, aaveRate, SU + growth);
-            if (yieldOracle.morphoSpotRate() == 0) zeroCount++;
         }
 
-        assertGt(zeroCount, 24, ">50% of observations are zero-rate");
+        // Every observation produces a non-zero rate
+        assertGt(yieldOracle.morphoSpotRate(), 0, "Morpho rate is non-zero at 5% APY");
 
-        // Despite the zeros, TWAR self-corrects — Morpho still wins
         vm.warp(block.timestamp + interval);
         (address vault,,) = yieldOracle.getOptimalVault();
-        assertEq(vault, address(morphoVault), "5% Morpho beats 3% Aave (self-correction works)");
+        assertEq(vault, address(morphoVault), "5% Morpho beats 3% Aave");
     }
 
-    /// @dev At 0.7% APY vs 0.1% Aave, most intervals still quantize to zero, but
-    ///      the observed non-zero spikes are enough for Morpho to clear the 0.5%
-    ///      threshold and win routing. This disproves the stronger claim that all
-    ///      low single-digit APY regimes necessarily break routing.
-    function test_audit_truncationAt07PctAPY_stillClearsRoutingThreshold() public {
+    /// @dev Even at very low APY (0.7%), SHARE_UNIT = 1e18 provides enough
+    ///      precision for every observation to register a non-zero rate.
+    function test_audit_noTruncationAt07PctAPY_withShareUnit1e18() public {
         uint256 SU = yieldOracle.SHARE_UNIT();
         uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
@@ -886,8 +883,8 @@ contract DivigentYieldOracleTest is TestBase {
             if (yieldOracle.morphoSpotRate() == 0) zeroCount++;
         }
 
-        // Most observations are still zero at this low APY regime.
-        assertGt(zeroCount, 40, "many observations should still be zero at 0.7% APY");
+        // With 1e18 precision, zero-rate observations should be rare or none
+        assertLe(zeroCount, 5, "few or no zero-rate observations at 0.7% APY with 1e18 precision");
 
         // Despite heavy quantization, Morpho should still clear the hurdle here.
         vm.warp(block.timestamp + interval);

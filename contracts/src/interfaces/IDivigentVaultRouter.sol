@@ -39,6 +39,21 @@ interface IDivigentVaultRouter {
     /// @notice Emitted when deposit pause state changes.
     event DepositsPaused(bool paused);
 
+    /// @notice Emitted when a withdrawal's proportional split was rebalanced
+    ///         because one vault's effective capacity was below its target slice.
+    ///         `shortLeg` identifies which vault was short: true = Morpho short,
+    ///         false = Aave short. The amount that was rerouted = abs(target - actual)
+    ///         on the short leg.
+    /// @dev    No event is emitted when the plan executes as originally proportioned.
+    event ExitRedirected(
+        address indexed wallet,
+        uint256 targetAave,
+        uint256 targetMorpho,
+        uint256 actualAave,
+        uint256 actualMorpho,
+        bool    shortLeg
+    );
+
     // ── Errors ────────────────────────────────────────────────────────────────
 
     error NotAuthorised();
@@ -70,6 +85,14 @@ interface IDivigentVaultRouter {
     ///         a smaller amount or wait for liquidity conditions to improve.
     error NoSafeRoute(uint256 amount);
 
+    /// @notice Reverts on withdrawal when Aave's redeemable cash plus Morpho's
+    ///         effective `maxWithdraw` is less than the requested gross USDC —
+    ///         i.e. neither vault, alone or combined, can service the exit.
+    /// @param  requested  The USDC amount the user is attempting to withdraw.
+    /// @param  available  The combined effective capacity across both vaults
+    ///                    at the time of the call.
+    error InsufficientVaultLiquidity(uint256 requested, uint256 available);
+
     /// @notice Reverts when the oracle has not been updated within MAX_STALENESS (2 hours).
     ///         Call DivigentYieldOracle.recordObservation() to refresh the oracle,
     ///         then retry the deposit.
@@ -87,7 +110,7 @@ interface IDivigentVaultRouter {
     ///         enabling gasless onboarding flows where the wallet signs off-chain.
     /// @param wallet   The agent wallet to authorise.
     /// @param deadline Unix timestamp after which the signature is invalid.
-    /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline).
+    /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline, uint256 nonce).
     function initializeFor(
         address wallet,
         uint256 deadline,
@@ -121,6 +144,13 @@ interface IDivigentVaultRouter {
 
     /// @notice EIP-2612 permit variant — no prior USDC.approve() required.
     ///         Combines permit + deposit in a single transaction.
+    /// @param amount   USDC amount to deposit (6 decimals).
+    /// @param wallet   Agent wallet that owns the USDC and receives dvUSDC.
+    /// @param deadline Unix timestamp after which the permit signature is invalid.
+    /// @param v        ECDSA signature component v.
+    /// @param r        ECDSA signature component r.
+    /// @param s        ECDSA signature component s.
+    /// @return dvUsdcMinted Number of dvUSDC tokens minted.
     function depositWithPermit(
         uint256 amount,
         address wallet,
@@ -175,7 +205,8 @@ interface IDivigentVaultRouter {
     // ── View: Preview & Simulation ─────────────────────────────────────────────
 
     /// @notice Preview how many dvUSDC shares would be minted for a given USDC deposit.
-    ///         Uses the current exchange rate (pre-deposit snapshot semantics).
+    ///         Uses the current live exchange rate. Note: the actual deposit uses a
+    ///         pre-transfer snapshot, so the minted amount may differ slightly.
     /// @param assets USDC amount to simulate depositing (6 decimals).
     /// @return dvUsdcOut Expected dvUSDC minted.
     function previewDeposit(uint256 assets) external view returns (uint256 dvUsdcOut);

@@ -19,3 +19,9 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "test/=test/",
 ]
+
+# Allow deploy scripts to write the addresses JSON
+fs_permissions = [{ access = "read-write", path = "deployments" }]
+
+[rpc_endpoints]
+base = "${BASE_RPC_URL}"

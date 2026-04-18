@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {Actions} from "../helpers/Actions.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
 
-/// @title  TVL Cap Evolution -- End-to-End Flow
+/// @title  TVL Cap Evolution End-to-End Flow
 /// @notice Verifies the protocol's TVL cap behaves correctly across its three
 ///         scheduled phases and across the boundary transitions:
 ///           - Day 0   - Day 30:  cap is 500k USDC.
@@ -17,14 +17,14 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///           - Wrong second threshold (cap should fully lift AT day 91).
 ///           - Any bug that makes the cap permanent (i.e., never expands).
 ///           - Any bug where a partial withdraw doesn't free up cap headroom.
-contract TVLCapEvolutionFlowTest is Actions {
+contract TVLCapEvolutionTest is Actions {
     function test_tvlCap_evolvesAcrossDay31_Day91_correctly() public {
         // Need a wallet with enough USDC to push every cap.
         address whale = makeActor("whale_cap", 5_000_000e6);
 
         useAaveRoute();
 
-        // ===== Phase 1 ===== Day 0 -- initial cap 500k =======================
+        // ===== Phase 1 ===== Day 0: initial cap 500k =======================
 
         assertEq(router.currentTVLCap(), 500_000e6, "Phase1: initial cap == 500k");
 
@@ -38,7 +38,7 @@ contract TVLCapEvolutionFlowTest is Actions {
 
         // Any further deposit above MIN_DEPOSIT must revert with the cap-breach
         // amount and current cap. (Below MIN_DEPOSIT, the MIN_DEPOSIT gate
-        // fires first and we'd be testing the wrong thing.)
+        // fires first, which is a different code path.)
         uint256 minDeposit = router.MIN_DEPOSIT();
         vm.prank(whale);
         usdc.approve(address(router), minDeposit);
@@ -57,7 +57,7 @@ contract TVLCapEvolutionFlowTest is Actions {
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, minDeposit, 500_000e6));
         router.deposit(minDeposit, whale);
 
-        // ===== Phase 3 ===== Day 31 -- cap expands to 2M =====================
+        // ===== Phase 3 ===== Day 31: cap expands to 2M =====================
 
         fastForward(1 days + 1); // tip past day 31
         assertEq(router.currentTVLCap(), 2_000_000e6, "Phase3: cap expanded to 2M at day 31");
@@ -87,7 +87,7 @@ contract TVLCapEvolutionFlowTest is Actions {
         // We can deposit back into the freed room.
         userDeposits(whale, 100_000e6);
 
-        // ===== Phase 5 ===== Day 91 -- cap removed ===========================
+        // ===== Phase 5 ===== Day 91: cap removed ===========================
 
         fastForward(60 days + 1); // tip past day 91 (already at day 31+, plus 60 more)
         assertEq(router.currentTVLCap(), type(uint256).max, "Phase5: cap fully removed at day 91+");

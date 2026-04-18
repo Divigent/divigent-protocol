@@ -13,13 +13,13 @@ import {Actions} from "../helpers/Actions.sol";
 ///
 ///         This is the "if any subtle accounting bug exists, this test catches it"
 ///         scenario — multi-actor + time + yield + fees in one continuous journey.
-contract MultiUserYieldFlowTest is Actions {
+contract MultiUserYieldTest is Actions {
     function test_multiUserYield_distributesProportionallyAcrossTime() public {
         // ─── Actors with realistic stakes ────────────────────────────────────
         address aliceJ = makeActor("alice_journey", 1_000_000e6);
         address bobJ = makeActor("bob_journey", 1_000_000e6);
 
-        // Both deposits route to Aave so we can simulate yield deterministically
+        // Both deposits route to Aave for deterministic yield simulation
         // by minting aTokens to the router (mirrors Aave's rebasing aToken).
         useAaveRoute();
 

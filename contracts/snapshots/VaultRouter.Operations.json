@@ -1,0 +1,9 @@
+{
+  "deposit": "195880",
+  "withdraw": "126284",
+  "initialize": "45095",
+  "initializeFor": "39708",
+  "setOperator": "46122",
+  "pauseDeposits": "44389",
+  "unpauseDeposits": "22792"
+}

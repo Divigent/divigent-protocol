@@ -28,7 +28,7 @@ abstract contract Actions is RouterIntegrationBase {
     // Structs — point-in-time state snapshots
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @dev Captures everything we need to assert wallet-level state moved correctly.
+    /// @dev Captures wallet-level state for pre/post assertions.
     struct WalletSnap {
         uint256 usdcBalance; // ERC20 USDC the wallet holds
         uint256 dvUsdcBalance; // dvUSDC shares the wallet holds
@@ -132,7 +132,7 @@ abstract contract Actions is RouterIntegrationBase {
     function userWithdraws(address wallet, uint256 shares, uint256 minOut) internal returns (uint256 returned) {
         WalletSnap memory pre = snap(wallet);
 
-        // Mirror the router's principalOut calculation so we can assert costBasis movement.
+        // Mirror the router's principalOut calculation for costBasis assertions.
         uint256 expectedPrincipalOut = pre.dvUsdcBalance > 0 ? (pre.costBasis * shares) / pre.dvUsdcBalance : 0;
 
         vm.prank(wallet);

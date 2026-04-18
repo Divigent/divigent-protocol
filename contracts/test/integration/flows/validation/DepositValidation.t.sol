@@ -144,9 +144,9 @@ contract DepositValidationTest is Actions {
     function test_deposit_revertsWith_ZeroAmount_whenShareMathRoundsToZero() public {
         // Precondition for `dvUsdcMinted == 0`:
         //   amount * (totalSupply + 1) < (totalAssets + 1)   [virtual-offset floor]
-        // With amount = MIN_DEPOSIT = 10e6 and a small totalSupply, we need
+        // With amount = MIN_DEPOSIT = 10e6 and a small totalSupply, this needs
         // totalAssets > amount * (totalSupply + 1) ≈ 1e14, i.e. ~$100M of donated
-        // aTokens. That exceeds the day-0 TVL cap (500k), so we warp past day 91
+        // aTokens. That exceeds the day-0 TVL cap (500k), so warp past day 91
         // to remove the cap, then build the pathological state.
 
         fastForward(92 days);
@@ -181,7 +181,7 @@ contract DepositValidationTest is Actions {
     function test_depositWithPermit_revertsWith_PermitExpired_whenDeadlineInPast() public {
         // The PermitExpired check is the first line of depositWithPermit,
         // before the USDC.permit call. No need for a real signature here —
-        // we only want to hit the deadline branch.
+        // only the deadline branch should fire.
         uint256 expiredDeadline = block.timestamp - 1;
 
         vm.prank(alice);

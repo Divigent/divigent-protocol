@@ -41,7 +41,8 @@ interface IDivigentYieldOracle {
     /// @notice Returns rate data for all supported vaults.
     function getAllRates() external view returns (VaultRate[] memory rates);
 
-    /// @notice Returns true if `vaultType`'s utilisation is below the safety threshold.
+    /// @notice Returns true if `vaultType` passes its safety heuristic.
+    ///         Aave: utilisation below 90%. Morpho: share price >= 1 USDC (not underwater).
     function isVaultSafe(VaultType vaultType) external view returns (bool);
 
     // ── Freshness ─────────────────────────────────────────────────────────────

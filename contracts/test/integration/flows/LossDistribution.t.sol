@@ -16,7 +16,7 @@ import {Actions} from "../helpers/Actions.sol";
 ///           - Any bug that distributes losses unevenly across users.
 ///           - Any bug that breaks pricePerShare under PPS < 1.0.
 ///           - Any bug in the `actualGross > principalOut ? ... : 0` ternary.
-contract LossScenarioFlowTest is Actions {
+contract LossDistributionTest is Actions {
     function test_loss_principalHaircutDistributedFairly_noFeeCharged() public {
         // ─── Setup: two depositors share the pool ───────────────────────────
 

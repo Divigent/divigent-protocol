@@ -3,20 +3,20 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 
-/// @title  Mixed-Vault Edge Cases -- End-to-End Flows
+/// @title  Mixed-Vault Edge Cases End-to-End Flows
 /// @notice Stresses the proportional redemption logic under extreme asymmetry.
 ///         Existing flow tests cover balanced mixed positions (60/40, 50/50).
 ///         This file covers the lopsided and low-amount cases where rounding
 ///         and proportional math most likely misbehave:
 ///
-///           1. 99% Aave / 1% Morpho -- most of the redemption from Aave, small
+///           1. 99% Aave / 1% Morpho: most of the redemption from Aave, small
 ///              slice from Morpho.
-///           2. 1% Aave / 99% Morpho -- symmetric.
-///           3. Very small withdrawal from a mixed position -- does the
+///           2. 1% Aave / 99% Morpho: symmetric.
+///           3. Very small withdrawal from a mixed position: does the
 ///              proportional split round either side to 0 cleanly?
 ///           4. Sequential partial withdrawals from a mixed yielding position --
 ///              cumulative accuracy over many calls.
-contract MixedVaultEdgeCasesFlowTest is Actions {
+contract MixedVaultEdgeCasesTest is Actions {
     // ─────────────────────────────────────────────────────────────────────────
     // 1. 99/1 Aave-dominant mixed position
     // ─────────────────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ contract MixedVaultEdgeCasesFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Very small withdrawal from mixed position -- rounding handled
+    // 3. Very small withdrawal from mixed position: rounding handled
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev When the withdraw amount is tiny relative to the pool, the
@@ -120,7 +120,7 @@ contract MixedVaultEdgeCasesFlowTest is Actions {
         uint256 returned = userWithdraws(aliceS, 1);
 
         // Either returned is 0 (both sides rounded) or returned is a tiny positive.
-        // The point of this test is that the call does not revert under extreme
+        // Verifies the call does not revert under extreme
         // rounding on one side of the split.
         assertLe(returned, 2, "tiny withdraw returns at most a few wei");
     }

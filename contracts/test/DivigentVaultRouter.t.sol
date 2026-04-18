@@ -169,7 +169,7 @@ contract DivigentVaultRouterTest is Test {
         _deposit(alice, alice, depositAmount);
 
         // Simulate 5% yield: mint extra USDC to aToken address.
-        // The router reads aToken.balanceOf(router) as Aave assets; we inflate it
+        // The router reads aToken.balanceOf(router) as Aave assets; inflate it
         // by minting aTokens to the router, which mirrors how Aave accrues yield.
         uint256 yieldAmount = depositAmount * 5 / 100;
         aToken.mint(address(router), yieldAmount);

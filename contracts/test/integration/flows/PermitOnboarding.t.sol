@@ -5,15 +5,15 @@ import {Actions} from "../helpers/Actions.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
 
-/// @title  Signature-Driven Onboarding and Deposit -- End-to-End Flow
+/// @title  Permit Onboarding End-to-End Flow
 /// @notice Pins down the two signature-driven entry points used by SDKs and
 ///         sponsored-relay services:
 ///
-///           - `initializeFor(wallet, deadline, sig)` -- EIP-712 signature over
+///           - `initializeFor(wallet, deadline, sig)`: EIP-712 signature over
 ///             the router's `InitializeFor` type. Permissionless: anyone holding
 ///             a valid signature can submit, which is how sponsored onboarding
 ///             works on L2s.
-///           - `depositWithPermit(amount, wallet, deadline, v, r, s)` -- EIP-2612
+///           - `depositWithPermit(amount, wallet, deadline, v, r, s)`: EIP-2612
 ///             signature over USDC's `Permit` type. The router pulls USDC from
 ///             `wallet` without a prior `approve` tx. Caller must be the wallet
 ///             itself or a pre-approved operator (the permit authorises the
@@ -23,7 +23,7 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///         the sponsor submits onboarding, then the wallet makes its first
 ///         deposit without an `approve` tx. That is the journey this file
 ///         tests end-to-end.
-contract PermitFlowTest is Actions {
+contract PermitOnboardingTest is Actions {
     /// @dev Mirrored from the router so `vm.expectEmit` matches on selector.
     event WalletAuthorised(address indexed wallet);
 
@@ -33,7 +33,7 @@ contract PermitFlowTest is Actions {
 
     /// @notice A new wallet signs both messages off-chain. A sponsor submits
     ///         onboarding on the wallet's behalf. Then the wallet makes its
-    ///         first deposit using the same permit signature -- no `approve`
+    ///         first deposit using the same permit signature: no `approve`
     ///         tx anywhere in the journey.
     function test_permit_sponsoredOnboardingThenPermitDeposit_noApproveAnywhere() public {
         (address wallet, uint256 walletKey) = makeAddrAndKey("permit_wallet");
@@ -69,7 +69,7 @@ contract PermitFlowTest is Actions {
         // --- On-chain: wallet submits depositWithPermit ---------------------
         // The permit signature substitutes for the `approve` tx; the wallet
         // still calls the deposit itself (onlyWalletOrOperator). This is the
-        // standard production path -- the permit's value is eliminating the
+        // standard production path: the permit's value is eliminating the
         // approve tx, not making the deposit gasless.
 
         useAaveRoute();
@@ -174,7 +174,7 @@ contract PermitFlowTest is Actions {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 4. initializeFor -- revert paths
+    // 4. initializeFor: revert paths
     // ═════════════════════════════════════════════════════════════════════════
 
     function test_initializeFor_revertsWith_WalletAlreadyAuthorised_onSignatureReplay() public {
@@ -222,9 +222,9 @@ contract PermitFlowTest is Actions {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 5. depositWithPermit -- revert paths
+    // 5. depositWithPermit: revert paths
     //    (PermitExpired at the router layer is covered in DepositValidation.t.sol;
-    //     here we test the USDC-layer signature checks.)
+    //     this tests the USDC-layer signature checks.)
     // ═════════════════════════════════════════════════════════════════════════
 
     function test_depositWithPermit_revertsWhenSignerIsNotOwner() public {

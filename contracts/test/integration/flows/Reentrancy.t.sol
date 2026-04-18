@@ -15,7 +15,7 @@ import {MockAavePool} from "../../mocks/MockAavePool.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockOracle} from "../../mocks/MockOracle.sol";
 
-/// @title  Reentrancy Resistance -- End-to-End Flow
+/// @title  Reentrancy End-to-End Flow
 /// @notice The router applies `nonReentrant` to `deposit` and `withdraw`. With the
 ///         current trusted dependencies (canonical USDC, audited Aave, audited
 ///         Morpho), no real reentry vector exists in production. But the modifier
@@ -24,10 +24,10 @@ import {MockOracle} from "../../mocks/MockOracle.sol";
 ///         that, on `withdraw`, attempts to reenter `router.withdraw`, and asserts
 ///         the guard fires.
 ///
-///         Note: this test is fully self-contained -- it deploys a fresh router
+///         Fully self-contained test: it deploys a fresh router
 ///         stack pointing at the hostile vault. It does NOT inherit from
 ///         RouterIntegrationBase because the shared base wires in MockMorphoVault.
-contract ReentrancyFlowTest is Test {
+contract ReentrancyTest is Test {
     DivigentVaultRouter internal router;
     DivigentFeeCollector internal feeCollector;
     DvUSDC internal dvUsdc;
@@ -79,12 +79,7 @@ contract ReentrancyFlowTest is Test {
         router.initialize();
     }
 
-    /// @notice The hostile Morpho's `withdraw` attempts to reenter `router.withdraw`.
-    ///         The router's `nonReentrant` modifier must fire on the inner call,
-    ///         making the inner call revert. That revert bubbles up and aborts the
-    ///         outer withdraw. Funds are not lost; the user simply cannot exit
-    ///         while the hostile vault is in place (the vault would need replacing).
-    function test_reentrancy_hostileMorphoCallbackIsBlocked() public {
+    function test_reentrancy_hostileMorphoWithdrawCallbackBlocked() public {
         // Alice deposits via Morpho route -> her USDC goes into the hostile vault.
         vm.prank(alice);
         usdc.approve(address(router), 50_000e6);
@@ -103,19 +98,69 @@ contract ReentrancyFlowTest is Test {
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
         router.withdraw(aliceShares, alice, 0);
 
-        // Confirm: alice's position is unchanged (the failed tx rolled back fully).
         assertEq(dvUsdc.balanceOf(alice), aliceShares, "shares unchanged after blocked attempt");
         assertEq(hostile.balanceOf(address(router)), 50_000e6, "hostile shares unchanged after blocked attempt");
+    }
+
+    function test_reentrancy_hostileMorphoDepositCallbackBlocked() public {
+        // Arm the hostile vault to reenter during deposit (via Morpho.deposit callback)
+        hostile.armReentranceOnDeposit();
+
+        vm.prank(alice);
+        usdc.approve(address(router), 50_000e6);
+        vm.prank(alice);
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        router.deposit(50_000e6, alice);
+
+        assertEq(dvUsdc.balanceOf(alice), 0, "no shares minted on blocked deposit");
+    }
+
+    function test_reentrancy_crossFunction_withdrawReentersDeposit() public {
+        // Deposit normally first
+        vm.prank(alice);
+        usdc.approve(address(router), 50_000e6);
+        vm.prank(alice);
+        router.deposit(50_000e6, alice);
+
+        // Arm cross-function: withdraw callback tries to call deposit
+        hostile.armCrossFunctionReentrance();
+
+        uint256 shares = dvUsdc.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        router.withdraw(shares, alice, 0);
+    }
+
+    function test_reentrancy_aaveCallbackBlocked() public {
+        // Route to Aave instead
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+
+        vm.prank(alice);
+        usdc.approve(address(router), 50_000e6);
+        vm.prank(alice);
+        router.deposit(50_000e6, alice);
+
+        // Arm Aave for reentrance on withdraw
+        aavePool.setReentranceTarget(address(router), alice);
+
+        uint256 shares = dvUsdc.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        router.withdraw(shares, alice, 0);
+
+        assertEq(dvUsdc.balanceOf(alice), shares, "shares unchanged");
     }
 }
 
 /// @dev MetaMorpho-shaped vault whose `withdraw` deliberately attempts to reenter
-///      the router. Used only by ReentrancyFlowTest. Implements just enough of the
+///      the router. Used only by ReentrancyTest. Implements just enough of the
 ///      ERC-4626/IMorphoVault surface that the router calls.
 contract HostileMorpho {
     MockERC20 public immutable usdc;
     address public router;
     bool public reentranceArmed;
+    bool public depositReentranceArmed;
+    bool public crossFunctionArmed;
 
     mapping(address => uint256) public balanceOf;
     uint256 public totalShares;
@@ -131,6 +176,14 @@ contract HostileMorpho {
 
     function armReentrance() external {
         reentranceArmed = true;
+    }
+
+    function armReentranceOnDeposit() external {
+        depositReentranceArmed = true;
+    }
+
+    function armCrossFunctionReentrance() external {
+        crossFunctionArmed = true;
     }
 
     // ----- 4626 view surface ---------------------------------------------
@@ -180,6 +233,11 @@ contract HostileMorpho {
     // ----- 4626 mutative surface -----------------------------------------
 
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
+        if (depositReentranceArmed) {
+            depositReentranceArmed = false;
+            DivigentVaultRouter(router).deposit(1000e6, receiver);
+            revert("HostileMorpho: deposit reentrance was NOT blocked");
+        }
         usdc.burn(msg.sender, assets);
         shares = (totalShares == 0) ? assets : (assets * totalShares) / totalAssets_;
         totalAssets_ += assets;
@@ -187,16 +245,16 @@ contract HostileMorpho {
         balanceOf[receiver] += shares;
     }
 
-    /// @dev The hostile bit: when armed, attempt to reenter router.withdraw.
-    ///      The router's `nonReentrant` should make the inner call revert.
     function withdraw(uint256 assets, address receiver, address owner_) external returns (uint256 shares) {
         if (reentranceArmed) {
-            reentranceArmed = false; // only attempt once
-            // Try to reenter the router during its own withdraw.
-            // This call should revert with OZ v5's ReentrancyGuardReentrantCall.
+            reentranceArmed = false;
             DivigentVaultRouter(router).withdraw(1, owner_, 0);
-            // If we ever get here, reentrance succeeded -- fail loudly.
             revert("HostileMorpho: reentrance was NOT blocked");
+        }
+        if (crossFunctionArmed) {
+            crossFunctionArmed = false;
+            DivigentVaultRouter(router).deposit(1000e6, owner_);
+            revert("HostileMorpho: cross-function reentrance was NOT blocked");
         }
         shares = (assets * totalShares + totalAssets_ - 1) / totalAssets_;
         balanceOf[owner_] -= shares;

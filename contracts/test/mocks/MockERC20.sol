@@ -75,7 +75,7 @@ contract MockERC20 {
         address signer = ecrecover(digest, v, r, s);
         if (signer == address(0) || signer != owner) revert PermitInvalidSigner();
 
-        // Only consume the nonce once we're committing to the allowance update.
+        // Consume the nonce only when committing to the allowance update.
         // This ordering matches OpenZeppelin ERC20Permit: failed signatures do
         // NOT burn a nonce.
         unchecked {

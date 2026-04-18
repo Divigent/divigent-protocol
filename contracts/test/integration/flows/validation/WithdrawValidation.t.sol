@@ -71,7 +71,7 @@ contract WithdrawValidationTest is Actions {
 
     /// @dev The `totalHeld == 0` branch fires when the router holds zero aTokens
     ///      AND zero Morpho shares while someone still has dvUSDC. This is an
-    ///      unreachable-by-happy-path state, but we exercise it by wiping the
+    ///      unreachable-by-happy-path state, exercised here by wiping the
     ///      router's aToken balance to simulate a catastrophic external loss.
     function test_withdraw_revertsWith_ZeroAmount_whenTotalHeldIsZero() public {
         useAaveRoute();

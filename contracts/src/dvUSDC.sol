@@ -25,7 +25,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///         - ERC20Permit is intentionally omitted: permit + delegated-transfer could
 ///           circumvent the non-transferability constraint via a signed approval flow.
 ///
-/// @custom:invariant totalSupply() * pricePerShare >= totalDepositedUSDC (enforced in VaultRouter)
+/// @custom:invariant totalSupply() * VaultRouter.pricePerShare() / 1e18 >= sum(costBasisUSDC) (enforced in VaultRouter)
 contract DvUSDC is ERC20 {
     // ── Immutables ────────────────────────────────────────────────────────────
 

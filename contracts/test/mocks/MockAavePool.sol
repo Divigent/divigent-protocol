@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {MockERC20} from "./MockERC20.sol";
+import {IDivigentVaultRouter} from "../../src/interfaces/IDivigentVaultRouter.sol";
 
 contract MockAavePool {
     MockERC20 public usdc;
@@ -9,6 +10,15 @@ contract MockAavePool {
 
     uint128 public currentLiquidityRate;
     uint256 public reserveNormalizedIncome = 1e27;
+    bool public silentFailWithdraw;
+    address public reentranceTarget;
+    address public reentranceWallet;
+
+    function setSilentFailWithdraw(bool fail) external { silentFailWithdraw = fail; }
+    function setReentranceTarget(address target, address wallet) external {
+        reentranceTarget = target;
+        reentranceWallet = wallet;
+    }
 
     constructor(address usdc_, address aToken_) {
         usdc = MockERC20(usdc_);
@@ -36,6 +46,17 @@ contract MockAavePool {
     }
 
     function withdraw(address, uint256 amount, address to) external returns (uint256) {
+        if (silentFailWithdraw) {
+            aToken.burn(msg.sender, amount);
+            return 0;
+        }
+        if (reentranceTarget != address(0)) {
+            address target = reentranceTarget;
+            address wallet = reentranceWallet;
+            reentranceTarget = address(0);
+            IDivigentVaultRouter(target).withdraw(1, wallet, 0);
+            revert("MockAavePool: reentrance was NOT blocked");
+        }
         aToken.burn(msg.sender, amount);
         usdc.mint(to, amount);
         return amount;

@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 
-/// @title  Routing Transition -- End-to-End Flow
+/// @title  Routing Transition End-to-End Flow
 /// @notice Models the steady-state production scenario: the oracle prefers one
 ///         vault for a stretch, then market conditions shift and it begins
 ///         preferring the other. Different users deposit at different times
@@ -21,12 +21,12 @@ import {Actions} from "../helpers/Actions.sol";
 ///             deposited via the other.
 ///           - The full mixed-vault withdraw split, exercised by users who didn't
 ///             deliberately split their own deposits.
-contract RoutingTransitionFlowTest is Actions {
+contract RoutingTransitionTest is Actions {
     function test_routingTransition_oracleFlipDoesNotMigrateExistingPositions() public {
         address aliceR = makeActor("alice_route", 500_000e6);
         address bobR = makeActor("bob_route", 500_000e6);
 
-        // ----- Phase 1 -- Oracle prefers Aave; Alice deposits early ---------
+        // ----- Phase 1: Oracle prefers Aave; Alice deposits early ---------
 
         useAaveRoute();
         uint256 aliceDeposit = 60_000e6;
@@ -37,20 +37,20 @@ contract RoutingTransitionFlowTest is Actions {
         assertApproxEqAbs(afterAlice.aaveAssets, aliceDeposit, 1, "Phase1: Aave got Alice's deposit");
         assertEq(afterAlice.morphoAssets, 0, "Phase1: Morpho still empty");
 
-        // ----- Phase 2 -- Time passes, oracle flips to Morpho ---------------
+        // ----- Phase 2: Time passes, oracle flips to Morpho ---------------
 
         fastForward(7 days);
         useMorphoRoute();
 
         // Critical: flipping the oracle is a NO-OP on existing protocol state.
         // Using the custom `assertEq(ProtocolSnap, ProtocolSnap)` overload gives
-        // field-by-field failure diagnostics -- if any field drifts, the error
+        // field-by-field failure diagnostics: if any field drifts, the error
         // message points at the specific field, not a generic struct mismatch.
         ProtocolSnap memory afterFlip = snapProtocol();
         assertEq(afterFlip, afterAlice, "Phase2: oracle flip is a no-op on protocol state");
         assertEq(dvUsdc.balanceOf(aliceR), aliceShares, "Phase2: Alice's shares unchanged by oracle flip");
 
-        // ----- Phase 3 -- Bob deposits AFTER the flip; routes to Morpho -----
+        // ----- Phase 3: Bob deposits AFTER the flip; routes to Morpho -----
 
         uint256 bobDeposit = 40_000e6;
         uint256 bobShares = userDeposits(bobR, bobDeposit);
@@ -69,7 +69,7 @@ contract RoutingTransitionFlowTest is Actions {
         assertEq(aliceAfterBob.dvUsdcBalance, aliceShares, "Phase3: Alice's shares untouched by Bob's deposit");
         assertEq(aliceAfterBob.costBasis, aliceDeposit, "Phase3: Alice's costBasis untouched by Bob's deposit");
 
-        // ----- Phase 4 -- Yield accrues in both vaults simultaneously -------
+        // ----- Phase 4: Yield accrues in both vaults simultaneously -------
 
         fastForward(30 days);
         uint256 aaveYield = 1_200e6; // ~60% of pool got 1.2k
@@ -77,7 +77,7 @@ contract RoutingTransitionFlowTest is Actions {
         uint256 totalYield = aaveYield + morphoYield;
         accrueYieldInBothVaults(aaveYield, morphoYield);
 
-        // ----- Phase 5 -- Alice exits, exercising the mixed-vault split -----
+        // ----- Phase 5: Alice exits, exercising the mixed-vault split -----
         //
         // Alice never personally deposited into Morpho, but her exit will pull
         // proportionally from BOTH vaults because the router's pool is mixed.
@@ -105,7 +105,7 @@ contract RoutingTransitionFlowTest is Actions {
         assertEq(bobAfterAlice.dvUsdcBalance, bobShares, "Phase5: Bob's shares untouched by Alice's exit");
         assertEq(bobAfterAlice.costBasis, bobDeposit, "Phase5: Bob's costBasis untouched by Alice's exit");
 
-        // ----- Phase 6 -- Bob exits; receives his share of combined yield ---
+        // ----- Phase 6: Bob exits; receives his share of combined yield ---
 
         uint256 treasuryBeforeBob = usdc.balanceOf(treasury);
         uint256 bobReturn = userWithdraws(bobR, bobShares);

@@ -3,30 +3,30 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 
-/// @title  Precision and Ordering -- End-to-End Flows
-/// @notice Stresses arithmetic precision and ordering guarantees -- the kinds
+/// @title  Precision End-to-End Flows
+/// @notice Stresses arithmetic precision and ordering guarantees: the kinds
 ///         of bugs that hide under small amounts, long sequences, or round-trip
 ///         scenarios where a correct protocol should net to zero.
 ///
-///           1. Deposit and withdraw in the same block with no yield -- user
+///           1. Deposit and withdraw in the same block with no yield: user
 ///              must get the principal back. Any bug that leaks wei on the
 ///              deposit-withdraw round trip surfaces here.
 ///
-///           2. Twenty partial withdrawals on a yielding position -- cumulative
+///           2. Twenty partial withdrawals on a yielding position: cumulative
 ///              returns must match what a single full exit would have produced,
 ///              within O(n) rounding, not O(n^2).
 ///
-///           3. Yield up, then equal loss (round trip) -- a sole depositor who
+///           3. Yield up, then equal loss (round trip): a sole depositor who
 ///              holds through both events breaks even. Any bug that charges
 ///              fee on the round trip, or that distorts principal accounting
 ///              across the cycle, shows up as a mismatched return.
 ///
-///           4. Multiple depositors over yield-then-loss -- who pays the fee
+///           4. Multiple depositors over yield-then-loss: who pays the fee
 ///              on the phantom yield that later disappears? Answer: nobody.
 ///              Fees are only charged at withdraw time on realised yield.
-contract PrecisionFlowTest is Actions {
+contract PrecisionTest is Actions {
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. Same-block deposit + withdraw -- user gets principal back
+    // 1. Same-block deposit + withdraw: user gets principal back
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_precision_depositAndWithdrawSameBlock_returnsPrincipalExactly() public {
@@ -41,7 +41,7 @@ contract PrecisionFlowTest is Actions {
         // No time passage, no yield accrual.
         uint256 returned = userWithdraws(alice1, shares);
 
-        // Fee must be exactly zero -- no yield was realised.
+        // Fee must be exactly zero: no yield was realised.
         assertEq(usdc.balanceOf(treasury), treasuryBefore, "Same-block round trip: fee must be zero");
 
         // User must recover exactly the principal, modulo 1 wei of
@@ -52,7 +52,7 @@ contract PrecisionFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. Twenty partial withdrawals -- cumulative accuracy is O(n), not O(n^2)
+    // 2. Twenty partial withdrawals: cumulative accuracy is O(n), not O(n^2)
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_precision_twentyPartialWithdraws_cumulativeDriftIsBoundedLinearly() public {
@@ -94,7 +94,7 @@ contract PrecisionFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Yield then equal loss round trip -- sole holder breaks even
+    // 3. Yield then equal loss round trip: sole holder breaks even
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev The sole depositor scenario has the cleanest accounting: yield
@@ -113,7 +113,7 @@ contract PrecisionFlowTest is Actions {
         uint256 peakYield = 10_000e6;
         accrueAaveYield(peakYield);
 
-        // Alice DOES NOT withdraw during the peak -- she holds.
+        // Alice DOES NOT withdraw during the peak: she holds.
         // Now equal loss wipes out all the yield.
         aToken.setBalance(address(router), deposit_);
 
@@ -124,7 +124,7 @@ contract PrecisionFlowTest is Actions {
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 returned = userWithdraws(aliceY, shares);
 
-        // Fee must be zero -- she did not realise yield, even though yield
+        // Fee must be zero: she did not realise yield, even though yield
         // briefly existed on paper. The realised gross == principal; actualYield
         // clamps to zero at the `actualGross > principalOut ? ... : 0` guard.
         assertEq(usdc.balanceOf(treasury), treasuryBefore, "No fee charged on yield-then-loss round trip");
@@ -134,7 +134,7 @@ contract PrecisionFlowTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 4. Mid-journey exit during peak -- that user pays fee, later holders lose
+    // 4. Mid-journey exit during peak: that user pays fee, later holders lose
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev The adversarial variant of test #3: a mid-journey exit during the
@@ -163,7 +163,7 @@ contract PrecisionFlowTest is Actions {
         userWithdraws(aliceEarly, aliceShares);
         uint256 aliceFee = usdc.balanceOf(treasury) - treasuryBeforeAlice;
 
-        // Alice paid a fee -- she realised yield.
+        // Alice paid a fee: she realised yield.
         assertGt(aliceFee, 0, "Alice paid fee on realised peak yield");
 
         // Now the pool takes a loss equal to what yield remained.
@@ -175,7 +175,7 @@ contract PrecisionFlowTest is Actions {
             aToken.setBalance(address(router), bobDeposit);
         }
 
-        // Bob exits -- takes the loss.
+        // Bob exits: takes the loss.
         uint256 treasuryBeforeBob = usdc.balanceOf(treasury);
         uint256 bobShares = dvUsdc.balanceOf(bobLate);
         uint256 bobReturned = userWithdraws(bobLate, bobShares);
@@ -188,7 +188,7 @@ contract PrecisionFlowTest is Actions {
         // that would have been his share).
         assertLe(bobReturned, bobDeposit + 1, "Bob's return <= principal (loss absorbed)");
 
-        // Alice's earlier fee is NOT refunded -- the protocol does not rebate.
+        // Alice's earlier fee is NOT refunded: the protocol does not rebate.
         // Treasury retains Alice's fee.
         assertEq(usdc.balanceOf(treasury) - treasuryBeforeAlice, aliceFee, "Alice's fee not refunded");
     }

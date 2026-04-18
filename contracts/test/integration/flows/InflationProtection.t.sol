@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 
-/// @title  Donation Attack -- End-to-End Flow
+/// @title  Inflation Protection: End-to-End Flow
 /// @notice Verifies the virtual-offset protection (`+1` in numerator and denominator
 ///         of `_assetsToShares`) actually defends against the classic ERC-4626
 ///         first-depositor inflation attack.
@@ -13,17 +13,17 @@ import {Actions} from "../helpers/Actions.sol";
 ///           2. Attacker "donates" a large amount of aTokens directly to the router
 ///              (in production: by supplying USDC to Aave on behalf of the router).
 ///           3. PPS spikes; the attacker holds the only shares.
-///           4. Victim deposits -- share math now rounds heavily down.
+///           4. Victim deposits: share math now rounds heavily down.
 ///           5. Attacker withdraws and tries to recover deposit + donation.
 ///
 ///         What the virtual offset enforces:
 ///           - Victim never mints zero shares for a positive deposit (assuming
 ///             reasonable donation-to-deposit ratio).
-///           - Victim's loss is bounded -- they never lose the majority of their deposit.
+///           - Victim's loss is bounded: they never lose the majority of their deposit.
 ///           - Attacker's donation is permanently locked in the pool. Their net
 ///             position (withdraw + fee they paid - deposit - donation) is negative --
 ///             the attack is unprofitable.
-contract DonationAttackFlowTest is Actions {
+contract InflationProtectionTest is Actions {
     function test_donationAttack_virtualOffsetMakesAttackUnprofitable() public {
         // ─── Setup: attacker and victim, both well-funded ──────────────────
 
@@ -32,7 +32,7 @@ contract DonationAttackFlowTest is Actions {
 
         useAaveRoute();
 
-        // ─── Phase 1 -- Attacker becomes first depositor with MIN_DEPOSIT ───
+        // ─── Phase 1: Attacker becomes first depositor with MIN_DEPOSIT ───
 
         uint256 attackerDeposit = router.MIN_DEPOSIT(); // 10 USDC
         uint256 attackerShares = userDeposits(attacker, attackerDeposit);
@@ -40,10 +40,10 @@ contract DonationAttackFlowTest is Actions {
         assertEq(attackerShares, attackerDeposit, "Phase1: first deposit mints 1:1");
         assertEq(router.pricePerShare(), 1e18, "Phase1: PPS = 1.0");
 
-        // ─── Phase 2 -- Attacker "donates" aTokens to inflate share value ───
+        // ─── Phase 2: Attacker "donates" aTokens to inflate share value ───
         //
         // In production, this is done by supplying USDC to Aave with the router
-        // as the recipient -- Aave mints aTokens to the router, none of which the
+        // as the recipient: Aave mints aTokens to the router, none of which the
         // attacker controls. We simulate by minting aTokens directly to the router.
 
         uint256 donationAmount = 100_000e6; // attacker spends $100k to inflate
@@ -52,7 +52,7 @@ contract DonationAttackFlowTest is Actions {
         uint256 ppsAfterDonation = router.pricePerShare();
         assertGt(ppsAfterDonation, 1_000e18, "Phase2: PPS spikes by ~10,000x after donation");
 
-        // ─── Phase 3 -- Victim deposits ─────────────────────────────────────
+        // ─── Phase 3: Victim deposits ─────────────────────────────────────
 
         uint256 victimDeposit = 50_000e6; // a substantial deposit
         uint256 victimShares = userDeposits(victim, victimDeposit);
@@ -62,7 +62,7 @@ contract DonationAttackFlowTest is Actions {
         // the deposit would revert with ZeroAmount, locking out new depositors entirely.
         assertGt(victimShares, 0, "Phase3: virtual offset protects against zero-share mint");
 
-        // ─── Phase 4 -- Victim withdraws ────────────────────────────────────
+        // ─── Phase 4: Victim withdraws ────────────────────────────────────
 
         uint256 victimReturn = userWithdraws(victim, victimShares);
 
@@ -76,9 +76,9 @@ contract DonationAttackFlowTest is Actions {
             "Phase4: victim's loss bounded to <10% of deposit (virtual-offset protection)"
         );
 
-        // ─── Phase 5 -- Attacker exits ──────────────────────────────────────
+        // ─── Phase 5: Attacker exits ──────────────────────────────────────
 
-        // Treasury delta is not asserted directly here -- the headline check is
+        // Treasury delta is not asserted directly here: the headline check is
         // attacker's net P&L, computed below. The fee they paid to treasury makes
         // them MORE unprofitable, never less, so it's bounded into the assertion.
         uint256 attackerReturn = userWithdraws(attacker, attackerShares);
@@ -87,14 +87,14 @@ contract DonationAttackFlowTest is Actions {
         //
         // Attacker's total cost = MIN_DEPOSIT + donationAmount.
         // Attacker's gross gain = attackerReturn (USDC out to attacker).
-        // Attacker also paid attackerFeeCollected to treasury -- they don't recover that.
+        // Attacker also paid attackerFeeCollected to treasury: they don't recover that.
         // Net = (attackerReturn) - (attackerDeposit + donationAmount).
         // Must be negative for the attack to be uneconomic.
 
         int256 attackerCost = int256(attackerDeposit + donationAmount);
         int256 attackerNetPnL = int256(attackerReturn) - attackerCost;
 
-        assertLt(attackerNetPnL, 0, "Phase5: attacker's net P&L is negative -- attack is unprofitable");
+        assertLt(attackerNetPnL, 0, "Phase5: attacker's net P&L is negative: attack is unprofitable");
 
         // The attacker should lose substantially more than they extracted from
         // the victim. If attacker's loss < victim's loss, the attack would be
@@ -114,7 +114,7 @@ contract DonationAttackFlowTest is Actions {
         assertEq(usdc.balanceOf(address(router)), 0, "Router holds no USDC (INV-4)");
 
         // Some aToken dust likely remains in the router due to virtual-offset rounding
-        // at extreme PPS values. The dust is permanently locked -- it's not a leak
+        // at extreme PPS values. The dust is permanently locked: it's not a leak
         // to anyone, but it documents that the protection has a residual cost.
         // No assertion on the dust size; it's a property of the protection itself.
     }

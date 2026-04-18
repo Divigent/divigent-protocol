@@ -10,7 +10,7 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///         limits, so the fuzzer spends its runs on realistic inputs.
 ///
 ///         Properties covered here are the ones journey tests can't reach
-///         exhaustively -- any single-call accounting leak, fee miscalc, or
+///         exhaustively: any single-call accounting leak, fee miscalc, or
 ///         share-math drift surfaces as soon as the fuzzer picks a bad input.
 ///
 ///         Structural invariants (INV-4: router holds zero USDC) are asserted

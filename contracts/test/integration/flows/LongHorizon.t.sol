@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 
-/// @title  Long-Horizon Holding -- End-to-End Flow
+/// @title  Long Horizon End-to-End Flow
 /// @notice Simulates a depositor holding for one full year through 12 monthly yield
 ///         events. Catches any rounding bug or accounting drift that's invisible
 ///         at low cycle counts.
@@ -18,7 +18,7 @@ import {Actions} from "../helpers/Actions.sol";
 ///         The test holds across 12 monthly cycles, snaps state mid-flight, and
 ///         verifies the realised-on-withdraw value matches the sum of yield events
 ///         within rounding bounds proportional to (cycles ^ 1), not (cycles ^ 2).
-contract LongHorizonFlowTest is Actions {
+contract LongHorizonTest is Actions {
     function test_longHorizon_yearOfMonthlyYield_noCumulativeDrift() public {
         address holder = makeActor("long_holder", 1_000_000e6);
 
@@ -66,7 +66,7 @@ contract LongHorizonFlowTest is Actions {
 
         // The realised yield should equal the sum of all cycle yields within
         // rounding. Crucially, the rounding error should be O(1) wei (independent
-        // of cycle count), not O(cycles) -- otherwise drift would snowball.
+        // of cycle count), not O(cycles): otherwise drift would snowball.
         assertApproxEqAbs(
             realisedYield,
             totalYieldExpected,

@@ -16,7 +16,7 @@ import {Actions} from "../helpers/Actions.sol";
 ///         This is the gap the existing integration tests miss: they only ever exercise
 ///         yield in ONE vault at a time. A subtle accounting bug that double-counts or
 ///         omits one side's yield would survive the existing suite but fail this one.
-contract MixedVaultYieldFlowTest is Actions {
+contract MixedVaultYieldTest is Actions {
     function test_mixedVaultYield_chargesFeeOnCombinedYield() public {
         address aliceM = makeActor("alice_mixed", 1_000_000e6);
 

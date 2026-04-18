@@ -20,7 +20,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///         - If yieldEarned is 0 (principal-only withdrawal), fee is exactly 0.
 ///
 /// @custom:invariant fee <= FEE_BPS * yieldEarned / BPS_DENOMINATOR (always)
-/// @custom:invariant USDC.balanceOf(address(this)) == 0 after every collectFee() call
+/// @custom:invariant USDC.balanceOf(address(this)) == 0 always (fees transfer directly from Router to Treasury)
 contract DivigentFeeCollector {
     using SafeERC20 for IERC20;
 
@@ -117,8 +117,8 @@ contract DivigentFeeCollector {
     ///         differences from Morpho's exact-asset withdrawal are absorbed before the fee
     ///         calculation, so the principal is never inadvertently charged a fee.
     ///
-    /// @dev    The FeeCollector holds USDC only transiently during this call.
-    ///         After execution, USDC.balanceOf(address(this)) returns to 0.
+    /// @dev    The FeeCollector never holds USDC. safeTransferFrom pulls directly
+    ///         from VaultRouter to TREASURY, bypassing FeeCollector's balance entirely.
     ///
     /// @param wallet      The agent wallet (for event indexing).
     /// @param yieldEarned The actual realised yield on which the fee is calculated.

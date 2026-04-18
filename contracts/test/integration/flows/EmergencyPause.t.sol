@@ -13,7 +13,7 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///         deposits resume.
 ///
 ///         Plus: only the multisig can flip the pause bit; random EOAs are rejected.
-contract EmergencyFlowTest is Actions {
+contract EmergencyPauseTest is Actions {
     function test_emergencyPause_blocksDepositsButPreservesExits() public {
         // ─── Setup: an existing depositor with accrued yield ────────────────
 

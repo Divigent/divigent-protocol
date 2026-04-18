@@ -4,15 +4,20 @@ pragma solidity ^0.8.20;
 import {MockERC20} from "./MockERC20.sol";
 
 contract MockMorphoVault {
-    uint256 private constant SHARE_UNIT = 1e6;
+    uint256 private constant SHARE_UNIT = 1e18;
 
     MockERC20 public usdc;
     uint256 public totalShares;
     uint256 public totalAssets_;
     uint256 public maxDepositAmount = type(uint256).max;
     uint256 public maxWithdrawAmount = type(uint256).max;
-    uint256 public manualSharePrice = SHARE_UNIT;
+    uint256 public manualSharePrice = 1e6;
     bool public useManualSharePrice;
+    bool public silentFailWithdraw;
+    bool public silentFailDeposit;
+
+    function setSilentFailWithdraw(bool fail) external { silentFailWithdraw = fail; }
+    function setSilentFailDeposit(bool fail) external { silentFailDeposit = fail; }
 
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -62,8 +67,14 @@ contract MockMorphoVault {
     }
 
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
+        if (silentFailDeposit) {
+            // Silent failure: accept USDC but return 0 shares, don't update accounting
+            usdc.transferFrom(msg.sender, address(this), assets);
+            return 0;
+        }
         shares = _assetsToShares(assets);
-        usdc.burn(msg.sender, assets);
+        // Use transferFrom so the mock works with real ERC20 (not just MockERC20.burn)
+        usdc.transferFrom(msg.sender, address(this), assets);
         totalAssets_ += assets;
         totalShares += shares;
         _balances[receiver] += shares;
@@ -77,11 +88,17 @@ contract MockMorphoVault {
         assets = _sharesToAssets(shares);
         _balances[owner] -= shares;
         totalShares -= shares;
-        totalAssets_ -= assets;
-        usdc.mint(receiver, assets);
+        // Safe subtraction: use _currentTotalAssets to avoid underflow with manual pricing
+        uint256 ct = _currentTotalAssets();
+        totalAssets_ = ct > assets ? ct - assets : 0;
+        usdc.transfer(receiver, assets);
     }
 
     function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares) {
+        if (silentFailWithdraw) {
+            // Silent failure: don't transfer USDC, return 0 shares
+            return 0;
+        }
         // Mirror real ERC-4626: reject assets > maxWithdraw so invariant tests
         // can model Morpho illiquidity via setMaxWithdraw(cap).
         require(assets <= maxWithdrawAmount, "MockMorphoVault: exceeds maxWithdraw");
@@ -94,8 +111,10 @@ contract MockMorphoVault {
 
         _balances[owner] -= shares;
         totalShares -= shares;
-        totalAssets_ -= assets;
-        usdc.mint(receiver, assets);
+        // Safe subtraction: use _currentTotalAssets to avoid underflow with manual pricing
+        uint256 ct = _currentTotalAssets();
+        totalAssets_ = ct > assets ? ct - assets : 0;
+        usdc.transfer(receiver, assets);
     }
 
     function maxWithdraw(address) external view returns (uint256) {
@@ -109,6 +128,8 @@ contract MockMorphoVault {
 
     function accrueYield(uint256 extraAssets) external {
         totalAssets_ += extraAssets;
+        // Back the yield with real USDC so transfer-based withdraw can pay out
+        usdc.mint(address(this), extraAssets);
     }
 
     function setMaxDeposit(uint256 cap) external {
@@ -142,7 +163,9 @@ contract MockMorphoVault {
 
     function _currentSharePrice() internal view returns (uint256) {
         if (useManualSharePrice) return manualSharePrice;
-        if (totalShares == 0) return SHARE_UNIT;
+        // 1e6 = 1 USDC per share. With SHARE_UNIT=1e18, this gives 18-decimal shares
+        // matching real MetaMorpho: deposit(1000e6) → 1000e18 shares.
+        if (totalShares == 0) return 1e6;
         return (totalAssets_ * SHARE_UNIT) / totalShares;
     }
 

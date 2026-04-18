@@ -16,7 +16,7 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///           1. End-to-end delegation journey for a single wallet/operator pair.
 ///           2. Cross-isolation: two operators on one wallet, and one operator on two
 ///              wallets — revoking one binding never affects the other.
-contract OperatorFlowTest is Actions {
+contract OperatorDelegationTest is Actions {
     // ─────────────────────────────────────────────────────────────────────────
     // Test 1 — End-to-end delegation journey
     // ─────────────────────────────────────────────────────────────────────────
@@ -26,9 +26,7 @@ contract OperatorFlowTest is Actions {
         address aliceOp = makeAddr("alice_operator");
         address bobIntruder = makeAddr("bob_intruder");
 
-        // Both operators start with their own USDC. The whole point of this test
-        // is verifying that NEITHER address has its USDC or dvUSDC moved by the
-        // delegation flow — funds always flow wallet ↔ vaults, never via operator.
+        // Operators hold their own USDC; delegation must never touch it.
         usdc.mint(aliceOp, 50_000e6);
         usdc.mint(bobIntruder, 50_000e6);
         uint256 aliceOpUsdcAtStart = usdc.balanceOf(aliceOp);
@@ -107,10 +105,7 @@ contract OperatorFlowTest is Actions {
 
         // ━━━ Final — Operators' own funds were never touched ━━━━━━━━━━━━━━━━
 
-        // The single most important assertion of this whole flow: across every action
-        // — Alice's deposits/withdraws on wallet's behalf, Bob's failed attempts —
-        // neither operator's USDC balance changed. Funds moved only between the
-        // wallet and the vaults; the operator was a permission-holder, never a custodian.
+        // Operator USDC unchanged across the entire flow.
         assertEq(
             usdc.balanceOf(aliceOp), aliceOpUsdcAtStart, "Final: alice's USDC untouched throughout her time as operator"
         );
@@ -144,7 +139,7 @@ contract OperatorFlowTest is Actions {
         vm.prank(wallet2);
         router.setOperator(opA, true);
 
-        // Before-state: every binding is what we set.
+        // Before-state: verify all bindings match configuration.
         assertTrue(router.isOperator(wallet1, opA), "Pre: wallet1->opA");
         assertTrue(router.isOperator(wallet1, opB), "Pre: wallet1->opB");
         assertTrue(router.isOperator(wallet2, opA), "Pre: wallet2->opA");
