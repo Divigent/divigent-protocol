@@ -1,10 +1,5 @@
 # Divigent Protocol Invariants
 
-Maple-style handler-based stateful invariant tests. 30 invariant assertions
-across 6 protocol components, verified after every random fuzzer action.
-
-Reference: [maple-core-v2/tests/invariants/BaseInvariants.t.sol](https://github.com/maple-labs/maple-core-v2/blob/main/tests/invariants/BaseInvariants.t.sol)
-
 ## Invariant Registry
 
 ### VaultRouter (11 invariants)
