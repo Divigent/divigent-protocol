@@ -164,5 +164,95 @@ contract ExitRedirectTest is Actions {
         assertApproxEqAbs(aaveAfter, 0, 2, "Aave drained to serve the exit");
         assertEq(morphoAfter, 0, "Morpho side stayed at 0");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 6. Both legs partial but combined-sufficient — must touch both vaults
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Critical redirect case: neither vault alone can serve the request,
+    ///      but together they can. Verifies the router splices liquidity across
+    ///      both legs rather than reverting. Covers the middle case that the
+    ///      existing 1-5 scenarios don't exercise.
+    function test_inv5_bothLegsPartial_combinedSufficient_splicesAcrossBothVaults() public {
+        address aliceR = makeActor("alice_inv5_combined", 500_000e6);
+
+        // Balanced 50/50 position of 100k total
+        useAaveRoute();
+        userDeposits(aliceR, 50_000e6);
+        useMorphoRoute();
+        userDeposits(aliceR, 50_000e6);
+
+        // Constrain BOTH legs. Each alone covers 30k; combined covers 60k.
+        // Alice withdraws half (~50k): neither alone suffices, combined does.
+        usdc.setBalance(address(aToken), 30_000e6);
+        morphoVault.setMaxWithdraw(30_000e6);
+
+        uint256 aaveBefore = aToken.balanceOf(address(router));
+        uint256 morphoBefore = morphoVault.balanceOf(address(router));
+
+        uint256 halfShares = dvUsdc.balanceOf(aliceR) / 2;
+        uint256 returned = userWithdraws(aliceR, halfShares);
+
+        assertApproxEqAbs(returned, 50_000e6, 2e6, "Combined-partial exit delivers ~50k");
+
+        // Critical: BOTH vault legs must have been touched (not just one fully).
+        uint256 aaveAfter = aToken.balanceOf(address(router));
+        uint256 morphoAfter = morphoVault.balanceOf(address(router));
+        assertLt(aaveAfter, aaveBefore, "Aave side was touched");
+        assertLt(morphoAfter, morphoBefore, "Morpho side was touched");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 7. Event payload verification — ExitRedirected carries correct args
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev The ExitRedirected event is consumed by indexers and operators.
+    ///      Assert the full payload, not just that the event fired. Scenarios
+    ///      1 and 2 assert event presence/absence but not field values.
+    function test_inv5_exitRedirected_event_payloadIsAccurate() public {
+        address aliceR = makeActor("alice_inv5_event", 500_000e6);
+
+        // Balanced position so proportional targets are predictable
+        useAaveRoute();
+        userDeposits(aliceR, 50_000e6);
+        useMorphoRoute();
+        userDeposits(aliceR, 50_000e6);
+
+        // Morpho yields zero capacity → redirect to Aave expected
+        morphoVault.setMaxWithdraw(0);
+
+        uint256 half = dvUsdc.balanceOf(aliceR) / 2;
+
+        vm.recordLogs();
+        userWithdraws(aliceR, half);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 redirectTopic = keccak256("ExitRedirected(address,uint256,uint256,uint256,uint256,bool)");
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != redirectTopic) continue;
+            found = true;
+
+            // topic[1] is indexed wallet
+            assertEq(address(uint160(uint256(logs[i].topics[1]))), aliceR, "wallet indexed");
+
+            // Decode the non-indexed args
+            (uint256 targetAave, uint256 targetMorpho, uint256 actualAave, uint256 actualMorpho, bool shortLeg)
+                = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, bool));
+
+            // Proportional target: ~25k each (both legs equal pre-constraint)
+            assertApproxEqAbs(targetAave, 25_000e6, 1e6, "target Aave ~25k");
+            assertApproxEqAbs(targetMorpho, 25_000e6, 1e6, "target Morpho ~25k");
+
+            // Actual: all 50k came from Aave (Morpho fully constrained)
+            assertApproxEqAbs(actualAave, 50_000e6, 1e6, "actual Aave ~50k");
+            assertEq(actualMorpho, 0, "actual Morpho 0");
+
+            // shortLeg=true means Morpho was the short leg
+            assertTrue(shortLeg, "shortLeg flag marks Morpho as the short leg");
+            break;
+        }
+        assertTrue(found, "ExitRedirected event must fire when a leg is short");
+    }
 }
 

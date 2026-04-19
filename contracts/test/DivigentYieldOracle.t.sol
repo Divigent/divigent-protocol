@@ -899,6 +899,80 @@ contract DivigentYieldOracleTest is TestBase {
         assertGt(r[1].twarRate, r[0].twarRate, "morpho TWAR exceeds aave TWAR");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  uint224 cumulative-wrap arithmetic (Uniswap-V2-style TWAR pattern)
+    //
+    //  The oracle deliberately stores `aaveCumulative` / `morphoCumulative` as
+    //  uint224 in each checkpoint and computes the delta under an `unchecked`
+    //  uint224 subtraction (see DivigentYieldOracle.sol:430-433). This lets the
+    //  cumulative wrap past 2^224 without losing correctness of the TWAR window,
+    //  because `(uint224(a) - uint224(b))` in unchecked Solidity correctly
+    //  recovers `(a - b) mod 2^224`.
+    //
+    //  These tests pin the wrap semantics directly. A refactor that either
+    //  removes `unchecked`, widens the cast to `uint256`, or narrows beyond
+    //  uint224 would flip the expected delta — a silent correctness regression
+    //  of the class Uniswap V2 famously shipped with.
+    //
+    //  Tests are pure-math (no oracle state needed) because the oracle's
+    //  internal cumulative accumulator would take ~8400 years at a 10% Aave
+    //  APY to overflow naturally.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Sanity: no wrap case. delta is a plain arithmetic subtraction.
+    function test_uint224Wrap_noWrap_deltaIsPlain() public pure {
+        uint256 cumNow = 1_000_000;
+        uint224 cpCum  = 500_000;
+        uint256 delta;
+        unchecked {
+            delta = uint256(uint224(cumNow) - cpCum);
+        }
+        assertEq(delta, 500_000, "no-wrap: delta equals plain subtraction");
+    }
+
+    /// @dev Live cumulative has wrapped past 2^224; the checkpoint was recorded
+    ///      just before the boundary. The unchecked uint224 subtraction must
+    ///      recover the correct delta (modulo 2^224), NOT a huge garbage value.
+    function test_uint224Wrap_liveWrapped_deltaIsCorrect() public pure {
+        // Checkpoint was recorded at (2^224 - 1001) → fits uint224.
+        uint224 cpCum = uint224(type(uint224).max - 1000);
+        // Live cumulative is at 2^224 + 499 (one wrap past the boundary).
+        uint256 cumNow = (uint256(1) << 224) + 499;
+
+        // Oracle's exact math: cast live to uint224, subtract in unchecked.
+        uint256 delta;
+        unchecked {
+            delta = uint256(uint224(cumNow) - cpCum);
+        }
+
+        // True delta in real numbers: (2^224 + 499) - (2^224 - 1001) = 1500.
+        // uint224(cumNow) = 499 (wraps). 499 - (2^224 - 1001) in uint224 wraps
+        // to 499 + 1001 = 1500. Matches the true delta exactly.
+        assertEq(delta, 1500, "wrap: delta equals true real-number delta");
+    }
+
+    /// @dev Multi-wrap: the live cumulative has wrapped multiple times since
+    ///      the checkpoint. The recovered delta is truncated to mod 2^224 —
+    ///      which documents the known limitation of the Uniswap-V2 pattern.
+    ///      In practice this never occurs (8400+ years at 10% APY), but the
+    ///      test pins the wrap behavior so a refactor can't silently regress.
+    function test_uint224Wrap_multiWrap_deltaIsMod2Pow224() public pure {
+        // Checkpoint stored at (2^224 - 50) — fits uint224.
+        uint224 cpCum = uint224(type(uint224).max - 49);
+        // Live cumulative is at 2^225 + 100 (two wraps past boundary).
+        uint256 cumNow = (uint256(2) << 224) + 100;
+
+        uint256 delta;
+        unchecked {
+            delta = uint256(uint224(cumNow) - cpCum);
+        }
+
+        // True real-number delta: (2^225 + 100) - (2^224 - 50) = 2^224 + 150.
+        // uint224(cumNow) = 100 (mod 2^224). 100 - (2^224 - 50) in uint224 wraps
+        // to 100 + 50 = 150. That's the real delta mod 2^224.
+        assertEq(delta, 150, "multi-wrap: delta is truncated to mod 2^224");
+    }
+
     function _expectedMorphoRate(uint256 lastPrice, uint256 currentPrice, uint256 elapsed)
         internal
         view

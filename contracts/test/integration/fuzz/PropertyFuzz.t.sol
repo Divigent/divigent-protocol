@@ -215,22 +215,117 @@ contract PropertyFuzzTest is Actions {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Boundary-failure fuzz (fuzz the revert paths too)
+    // Slippage boundary — pair success at minOut=preview with failure at +N
+    // across yield, loss, and mixed-vault states. The previous single test
+    // ("reverts on minOutTooHigh") only proved one direction and couldn't
+    // see drift bugs where `previewRedeem` was slightly HIGHER than actual.
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Withdraw with minOut above the realisable gross must always
-    ///         revert, whatever the deposit amount.
-    function test_withdraw_fuzz_revertsOnMinOutTooHigh(uint128 deposit_) public {
-        uint256 dep = bound(uint256(deposit_), MIN_AMOUNT, MAX_DEPOSIT);
-        address user = makeActor("slippage_user", ACTOR_FUNDING);
+    /// @notice `minOut = previewRedeem(shares)` must ALWAYS succeed. The
+    ///         preview is the protocol's public commitment for the caller,
+    ///         so the withdraw has to deliver at least that. Fuzzed across
+    ///         yield-only Aave positions.
+    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithYield(
+        uint128 deposit_,
+        uint96 yield_
+    ) public {
+        uint256 dep = bound(uint256(deposit_), 10_000e6, MAX_DEPOSIT);
+        uint256 yld = bound(uint256(yield_), 0, MAX_YIELD);
+        address user = makeActor("slip_yield_user", ACTOR_FUNDING);
 
         useAaveRoute();
         uint256 shares = userDeposits(user, dep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld);
+        }
 
-        // minOut one wei above what's withdrawable -> always reverts with
-        // SlippageExceeded(received, minExpected). Parametrized error: match
-        // on selector only (the received/expected values are fuzz-dependent).
-        uint256 minOutTooHigh = dep + 1;
+        uint256 preview = router.previewRedeem(shares, user);
+
+        vm.prank(user);
+        uint256 returned = router.withdraw(shares, user, preview);
+
+        assertGe(returned, preview, "returned >= minOut=preview");
+    }
+
+    /// @notice Same property under realised loss — preview accounts for the
+    ///         loss-branch math (no fee on underwater slice), so
+    ///         `minOut = preview` still succeeds.
+    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithLoss(
+        uint128 deposit_,
+        uint128 loss_
+    ) public {
+        uint256 dep = bound(uint256(deposit_), 50_000e6, MAX_DEPOSIT);
+        uint256 lossAmt = bound(uint256(loss_), 1_000e6, dep / 2);
+        address user = makeActor("slip_loss_user", ACTOR_FUNDING);
+
+        useAaveRoute();
+        uint256 shares = userDeposits(user, dep);
+        aToken.setBalance(address(router), dep - lossAmt);
+
+        uint256 preview = router.previewRedeem(shares, user);
+
+        vm.prank(user);
+        uint256 returned = router.withdraw(shares, user, preview);
+
+        assertGe(returned, preview, "returned >= minOut=preview under loss");
+    }
+
+    /// @notice Mixed-vault positions incur proportional-split rounding
+    ///         (Morpho's `_assetsToSharesRoundUp`). Preview already accounts
+    ///         for this via the same formula, so `minOut = preview` still
+    ///         succeeds even under yield.
+    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_mixedVaultWithYield(
+        uint128 aaveDep_,
+        uint128 morphoDep_,
+        uint96 yield_
+    ) public {
+        uint256 aaveDep = bound(uint256(aaveDep_), 10_000e6, MAX_DEPOSIT / 2);
+        uint256 morphoDep = bound(uint256(morphoDep_), 10_000e6, MAX_DEPOSIT / 2);
+        uint256 yld = bound(uint256(yield_), 0, MAX_YIELD);
+        address user = makeActor("slip_mixed_user", ACTOR_FUNDING);
+
+        useAaveRoute();
+        userDeposits(user, aaveDep);
+        useMorphoRoute();
+        userDeposits(user, morphoDep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld / 2);
+            accrueMorphoYield(yld / 2);
+        }
+
+        uint256 shares = dvUsdc.balanceOf(user);
+        uint256 preview = router.previewRedeem(shares, user);
+
+        vm.prank(user);
+        uint256 returned = router.withdraw(shares, user, preview);
+
+        assertGe(returned, preview, "returned >= minOut=preview (mixed+yield)");
+    }
+
+    /// @notice `minOut = previewRedeem + 100` must revert. 100 wei is well
+    ///         above any rounding drift the protocol could produce (preview
+    ///         matches actual within 4 wei in the tightest case, per
+    ///         PreviewExecutionParity). Asserts the slippage guard is NOT
+    ///         being bypassed on the fail side.
+    function test_withdraw_fuzz_minOutAbovePreview_reverts(
+        uint128 deposit_,
+        uint96 yield_
+    ) public {
+        uint256 dep = bound(uint256(deposit_), 10_000e6, MAX_DEPOSIT);
+        uint256 yld = bound(uint256(yield_), 0, MAX_YIELD);
+        address user = makeActor("slip_toohigh_user", ACTOR_FUNDING);
+
+        useAaveRoute();
+        uint256 shares = userDeposits(user, dep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld);
+        }
+
+        uint256 preview = router.previewRedeem(shares, user);
+        uint256 minOutTooHigh = preview + 100;
 
         vm.prank(user);
         vm.expectPartialRevert(IDivigentVaultRouter.SlippageExceeded.selector);

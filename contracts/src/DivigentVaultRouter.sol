@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAaveV3Pool}          from "./interfaces/IAaveV3Pool.sol";
 import {IMorphoVault}         from "./interfaces/IMorphoVault.sol";
@@ -170,7 +171,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param usdc              USDC address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 on Base).
-    /// @param aavePool          Aave V3 Pool (0x18cd499E3d7ed42fEBFCbf98a1d306f4ccc4d934 on Base).
+    /// @param aavePool          Aave V3 Pool (0xA238Dd80C259a72e81d7e4664a9801593F98d1c5 on Base).
     /// @param aToken            aUSDC address on Base.
     /// @param morphoVault       MetaMorpho USDC vault address on Base.
     /// @param oracle            DivigentYieldOracle address.
@@ -287,6 +288,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     function setOperator(address operator, bool approved) external override {
+        if (operator == address(0)) revert ZeroAddress();
         isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
     }
@@ -588,45 +590,72 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     }
 
     /// @inheritdoc IDivigentVaultRouter
-    /// @dev Algebraic derivation (assuming gross > principalOut, i.e. there is yield):
-    ///        net = gross * (1 - feeBps/bpsDenominator) + principalOut * (feeBps/bpsDenominator)
-    ///        where gross = s * (A+1) / (S+1), principalOut = costBasis * s / walletShares
-    ///      Solving for s:
-    ///        s = desiredNet * bpsDenominator * walletShares * (S+1)
-    ///            / [ (bpsDenominator - feeBps) * walletShares * (A+1)
-    ///                + feeBps * costBasis * (S+1) ]
-    ///      Rounds up to ensure the user receives at least desiredNetUSDC.
-    ///      If the position has no yield (principalOut >= gross), this formula slightly
-    ///      overestimates required shares — a conservative outcome that is acceptable
-    ///      for a preview function. The caller should verify with previewRedeem().
+    /// @dev Two-branch solver, selected by wallet loss state:
+    ///
+    ///      A wallet is "uniformly underwater" when walletShares * A1 <= costBasis * S1.
+    ///      In that regime every proportional slice satisfies gross_s <= principalOut_s,
+    ///      so withdraw() floors yield at 0 and charges no fee. Using the fee-adjusted
+    ///      formula there would treat negative yield as a fee rebate and under-solve
+    ///      for shares, breaking the ">= desiredNetUSDC" guarantee.
+    ///
+    ///      (1) Loss branch (grossAll <= costBasis):
+    ///            net = gross = s * (A+1) / (S+1)
+    ///            s   = ceil(desiredNet * (S+1) / (A+1))
+    ///
+    ///      (2) Profit branch (grossAll > costBasis):
+    ///            net = gross * (1 - feeBps/bpsDen) + principalOut * (feeBps/bpsDen)
+    ///            s   = desiredNet * bpsDen * walletShares * (S+1)
+    ///                / [ (bpsDen - feeBps) * walletShares * (A+1)
+    ///                  + feeBps * costBasis * (S+1) ]
+    ///
+    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC, and
+    ///      cap at walletShares (position value is a hard ceiling on what can be
+    ///      withdrawn regardless of desiredNet).
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external
         view
         override
         returns (uint256 dvUsdcShares)
     {
+        if (desiredNetUSDC == 0) return 0;
+
         uint256 walletShares = DV_USDC.balanceOf(wallet);
         if (walletShares == 0) return 0;
 
-        uint256 A1         = totalVaultAssets() + VIRTUAL_OFFSET;
-        uint256 S1         = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
-        uint256 costBasis  = costBasisUSDC[wallet];
-        uint256 feeBps     = FEE_COLLECTOR.FEE_BPS();
-        uint256 bpsDenom   = FEE_COLLECTOR.BPS_DENOMINATOR();
+        uint256 A1        = totalVaultAssets() + VIRTUAL_OFFSET;
+        uint256 S1        = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
+        uint256 costBasis = costBasisUSDC[wallet];
 
-        // numerator   = desiredNet * bpsDenominator * walletShares * S1
-        // denominator = (bpsDenom - feeBps) * walletShares * A1
-        //             + feeBps * costBasis * S1
-        uint256 numerator   = desiredNetUSDC * bpsDenom * walletShares * S1;
+        // Loss branch: wallet's total gross <= its costBasis ⇒ no fee on any slice.
+        uint256 grossAll = Math.mulDiv(walletShares, A1, S1, Math.Rounding.Floor);
+        if (grossAll <= costBasis) {
+            // Degenerate dust case: entire wallet values to 0 USDC (floor).
+            // Any share count — including walletShares — would redeem to 0 gross
+            // and silently under-deliver. Signal "unserviceable" via 0.
+            if (grossAll == 0) return 0;
+
+            dvUsdcShares = Math.mulDiv(desiredNetUSDC, S1, A1, Math.Rounding.Ceil);
+            if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
+            return dvUsdcShares;
+        }
+
+        // Profit branch: fee applies to (gross - principalOut).
+        uint256 feeBps   = FEE_COLLECTOR.FEE_BPS();
+        uint256 bpsDenom = FEE_COLLECTOR.BPS_DENOMINATOR();
+
         uint256 denominator = (bpsDenom - feeBps) * walletShares * A1
                             + feeBps * costBasis * S1;
-
         if (denominator == 0) return 0;
 
-        // Round up to ensure usdcReturned >= desiredNetUSDC
-        dvUsdcShares = (numerator + denominator - 1) / denominator;
+        // Uses OZ Math.mulDiv for 512-bit intermediate precision on the
+        // caller-controlled 4-way numerator. Ceil ensures usdcReturned >= desiredNetUSDC.
+        dvUsdcShares = Math.mulDiv(
+            desiredNetUSDC * bpsDenom,
+            walletShares * S1,
+            denominator,
+            Math.Rounding.Ceil
+        );
 
-        // Cap at wallet's actual holdings
         if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
     }
 

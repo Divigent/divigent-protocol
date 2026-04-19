@@ -21,19 +21,34 @@ contract OperatorHandler is CommonBase, StdUtils {
     uint256 public operatorWithdrawCount;
     uint256 public totalOperatorDeposited;
     uint256 public totalOperatorWithdrawn;
+    /// @dev Sum of realized yield across operator-triggered withdrawals. Feeds
+    ///      the exact fee-yield closure invariant alongside WithdrawHandler's
+    ///      equivalent counter for direct-user withdrawals.
+    uint256 public totalOperatorRealizedYield;
+
+    /// @notice USDC minted to the operator at construction. Pinned by the
+    ///         `Operator-A` invariant: the operator must never accumulate
+    ///         USDC beyond this baseline. Wallets receive all yield / principal
+    ///         via the router; operators merely authorise calls on behalf of
+    ///         wallets and never see the flow.
+    uint256 public constant INITIAL_OPERATOR_BALANCE = 10_000_000e6;
+
+    address public treasury;
 
     constructor(
         DivigentVaultRouter router_,
         DvUSDC dvUsdc_,
         MockERC20 usdc_,
+        address treasury_,
         address[] memory actors_
     ) {
         router = router_;
         dvUsdc = dvUsdc_;
         usdc = usdc_;
+        treasury = treasury_;
         actors = actors_;
         operator = address(0x70000);
-        usdc.mint(operator, 10_000_000e6);
+        usdc.mint(operator, INITIAL_OPERATOR_BALANCE);
     }
 
     function grantOperator(uint256 actorSeed) external {
@@ -77,10 +92,23 @@ contract OperatorHandler is CommonBase, StdUtils {
         uint256 toWithdraw = (shares * sharePct) / 100;
         if (toWithdraw == 0) return;
 
+        // Snapshot state for realized-yield accounting (mirrors WithdrawHandler).
+        uint256 costBasisBefore = router.costBasisUSDC(actor);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+
         vm.prank(operator);
         try router.withdraw(toWithdraw, actor, 0) returns (uint256 returned) {
             totalOperatorWithdrawn += returned;
             operatorWithdrawCount++;
+
+            uint256 costBasisAfter = router.costBasisUSDC(actor);
+            uint256 principalOut = costBasisBefore - costBasisAfter;
+            uint256 feePaid = usdc.balanceOf(treasury) - treasuryBefore;
+
+            uint256 gross = returned + feePaid;
+            if (gross > principalOut) {
+                totalOperatorRealizedYield += gross - principalOut;
+            }
         } catch {}
     }
 }

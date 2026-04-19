@@ -37,6 +37,37 @@ contract MockERC20 {
     error PermitDeadlineExpired();
     error PermitInvalidSigner();
 
+    /// @notice Reverts when a transfer would send tokens to a blocklisted address.
+    ///         Mirrors Circle's `require(!blacklisted[to])` on mainnet USDC, letting
+    ///         tests assert the real-world treasury-blocklist failure mode without
+    ///         faking it via approval manipulation.
+    error BlocklistedRecipient(address to);
+
+    /// @notice Reverts on any transfer while the global pause flag is set.
+    ///         Mirrors Circle's `pause()` admin action (March 2023 SVB incident),
+    ///         where no USDC transfer can succeed until unpaused.
+    error TokenPaused();
+
+    // ── Adversarial test hooks (default off) ─────────────────────────────────
+
+    /// @dev Addresses that cannot receive transfers. Mirrors Circle's
+    ///      per-address blacklist on canonical USDC.
+    mapping(address => bool) public blocklisted;
+
+    /// @dev When true, every transfer reverts. Mirrors Circle's global pause.
+    bool public transfersPaused;
+
+    /// @notice Mark `addr` as un/blocklisted. Transfers with `to == addr`
+    ///         revert with `BlocklistedRecipient(addr)` when blocklisted.
+    function setBlocklisted(address addr, bool flag) external {
+        blocklisted[addr] = flag;
+    }
+
+    /// @notice Toggle the global transfer pause.
+    function setTransfersPaused(bool flag) external {
+        transfersPaused = flag;
+    }
+
     constructor(string memory name_, string memory symbol_, uint8 decimals_) {
         name = name_;
         symbol = symbol_;
@@ -98,12 +129,16 @@ contract MockERC20 {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
+        if (transfersPaused) revert TokenPaused();
+        if (blocklisted[to]) revert BlocklistedRecipient(to);
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
         return true;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (transfersPaused) revert TokenPaused();
+        if (blocklisted[to]) revert BlocklistedRecipient(to);
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount;

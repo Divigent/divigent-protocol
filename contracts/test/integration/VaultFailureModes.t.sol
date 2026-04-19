@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {TestBase} from "../TestBase.sol";
+import {IDivigentVaultRouter} from "../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title SilentFailureTest
 /// @notice Tests for slither findings F-4: what happens when Aave or Morpho
@@ -49,7 +50,7 @@ contract SilentFailureTest is TestBase {
         // AFTER FIX: the router checks actualGross > 0 and reverts with
         // InsufficientVaultLiquidity when vault redemptions return nothing.
         // dvUSDC is NOT burned, user funds are safe.
-        vm.expectRevert();
+        vm.expectPartialRevert(IDivigentVaultRouter.InsufficientVaultLiquidity.selector);
         router.withdraw(shares, alice, 0);
 
         // Verify dvUSDC was NOT burned (tx reverted, state rolled back)
@@ -127,7 +128,9 @@ contract SilentFailureTest is TestBase {
         uint256 shares = dvUsdc.balanceOf(alice);
 
         vm.prank(alice);
-        vm.expectRevert(); // Should revert because no USDC to withdraw
+        // Aave USDC liquidity drained → aaveCap = 0, morphoCap = 0 → combined
+        // capacity is less than the gross target → InsufficientVaultLiquidity.
+        vm.expectPartialRevert(IDivigentVaultRouter.InsufficientVaultLiquidity.selector);
         router.withdraw(shares, alice, 0);
     }
 

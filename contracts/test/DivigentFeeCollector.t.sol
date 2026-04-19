@@ -181,14 +181,12 @@ contract DivigentFeeCollectorTest is Test {
         assertLe(fee, maxYield, "Fee should never exceed yield");
     }
 
-    function test_calculateFee_isDeterministic() public view {
-        uint256 yield_ = 123_456_789;
-        assertEq(
-            collector.calculateFee(yield_),
-            collector.calculateFee(yield_),
-            "Same input should always produce same output"
-        );
-    }
+    // NOTE: `test_calculateFee_isDeterministic` was removed — calling a
+    // `pure` function twice and comparing results tests the EVM, not the
+    // contract. Integration-level fee correctness (routed through the
+    // real router withdraw path, against realised vault yield) is covered
+    // by `test/integration/fuzz/PropertyFuzz.t.sol:test_fee_fuzz_exactlyTenPercentOfRealisedYield`
+    // — the canonical "fee matches realised yield end-to-end" test.
 
     function test_collectFee_returnMatchesCalculateFee() public {
         uint256 yieldEarned = 777e6;

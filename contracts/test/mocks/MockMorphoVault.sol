@@ -16,8 +16,25 @@ contract MockMorphoVault {
     bool public silentFailWithdraw;
     bool public silentFailDeposit;
 
+    /// @dev Plan/execute drift hook: if `driftOnNextWithdraw` is true, the
+    ///      NEXT call to `withdraw()` rewrites `maxWithdrawAmount` to
+    ///      `driftCapTo` BEFORE the require check — simulating a vault
+    ///      whose effective capacity dropped between the router's planning
+    ///      read and its mutating call.
+    bool public driftOnNextWithdraw;
+    uint256 public driftCapTo;
+
     function setSilentFailWithdraw(bool fail) external { silentFailWithdraw = fail; }
     function setSilentFailDeposit(bool fail) external { silentFailDeposit = fail; }
+
+    /// @notice Arm the drift hook. View calls (`maxWithdraw`, `totalAssets`)
+    ///         still return the pre-drift state, so the router plans based
+    ///         on the old cap; only the next `withdraw()` entry sees the
+    ///         new cap.
+    function setDriftOnNextWithdraw(uint256 newCap) external {
+        driftOnNextWithdraw = true;
+        driftCapTo = newCap;
+    }
 
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -98,6 +115,11 @@ contract MockMorphoVault {
         if (silentFailWithdraw) {
             // Silent failure: don't transfer USDC, return 0 shares
             return 0;
+        }
+        // Plan/execute drift: rewrite cap BEFORE the require check.
+        if (driftOnNextWithdraw) {
+            driftOnNextWithdraw = false;
+            maxWithdrawAmount = driftCapTo;
         }
         // Mirror real ERC-4626: reject assets > maxWithdraw so invariant tests
         // can model Morpho illiquidity via setMaxWithdraw(cap).

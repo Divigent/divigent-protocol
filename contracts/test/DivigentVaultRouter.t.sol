@@ -320,6 +320,79 @@ contract DivigentVaultRouterTest is Test {
         assertEq(shares, 0, "grossAll=0 must short-circuit to 0 shares");
     }
 
+    /// @dev Exact break-even boundary: grossAll == costBasis. The loss-branch
+    ///      predicate uses `<=` so this value goes to the loss branch (no fee).
+    ///      Verifies the round-trip still delivers >= desiredNet at the boundary.
+    function test_previewWithdrawNet_lossBranch_exactBreakEven() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // No yield, no loss. grossAll ~= costBasis (modulo the +1 virtual offset).
+        // A=100_000e6, S=100_000e6, walletShares=100_000e6, costBasis=100_000e6
+        //   grossAll = floor(100_000e6 * (100_000e6+1) / (100_000e6+1)) = 100_000e6
+        //   costBasis = 100_000e6 -> grossAll <= costBasis -> loss branch
+        uint256 desiredNet = 10_000e6;
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        assertGt(predictedShares, 0, "Should return non-zero at break-even");
+
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        // Exact boundary; no fee because yield = 0
+        assertGe(actualOut, desiredNet - 1, "break-even: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev Deep loss: 95% drawdown. Exercises the loss branch at an extreme
+    ///      where withdrawing more than the dust-guard threshold is still valid.
+    function test_previewWithdrawNet_lossBranch_deepLoss95() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // 95% drawdown: vault holds 5,000 USDC against 100,000 principal
+        aToken.burn(address(router), 95_000e6);
+        assertEq(router.totalVaultAssets(), 5_000e6, "Deep drawdown applied");
+
+        // Ask for 1k USDC - comfortably within the 5k vault total
+        uint256 desiredNet = 1_000e6;
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        assertGt(predictedShares, 0, "Returns shares for servable amount");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "Not the cap case");
+
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        assertGe(actualOut, desiredNet - 1, "deep loss: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev Cap boundary in loss regime: caller asks for more than their total
+    ///      position value. Preview must cap at walletShares. The >= desiredNet
+    ///      guarantee is intentionally waived in the cap case (user opted for
+    ///      max withdrawal, not a specific amount).
+    function test_previewWithdrawNet_lossBranch_cappedAtWalletShares() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // 30% drawdown: position is worth ~70k
+        aToken.burn(address(router), 30_000e6);
+
+        // Ask for 200k (way more than position value of 70k)
+        uint256 predictedShares = router.previewWithdrawNet(200_000e6, alice);
+
+        // Must cap at walletShares
+        assertEq(predictedShares, dvUsdc.balanceOf(alice), "Caps at walletShares in loss");
+
+        // Withdraw delivers full remaining position value - caller gets ~70k, not 200k
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+        assertApproxEqAbs(actualOut, 70_000e6, 2, "Cap delivers remaining position value");
+        assertLt(actualOut, 200_000e6, "Cap explicitly short-of-desired in this regime");
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  2. Stale oracle blocks deposits
     // ─────────────────────────────────────────────────────────────────────────

@@ -1,13 +1,37 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
 import {TestBase} from "../TestBase.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
 
-/// @title FindingsValidation
-/// @notice Proves 3 findings using REAL-WORLD scenarios only.
-///         No artificial mocks. Every trigger condition can happen in production.
+/// @title  FindingsValidation
+/// @notice Pins three auditor findings using the REAL failure modes they
+///         describe, not proxies.
+///
+///           R8 treasury blocklist — `usdc.setBlocklisted(treasury, true)`
+///                                    mirrors Circle's canonical USDC
+///                                    `require(!blacklisted[to])`. Any
+///                                    transfer to the treasury reverts with
+///                                    `BlocklistedRecipient(treasury)`.
+///
+///           R8 global USDC pause —   `usdc.setTransfersPaused(true)` mirrors
+///                                    Circle's `pause()` admin action. Every
+///                                    transfer — including fee flow — reverts
+///                                    with `TokenPaused()`.
+///
+///           R2 permissionless sig —  `initializeFor` signatures can be
+///                                    submitted by any address.
+///
+///           R5 preview overflow —    `previewWithdrawNet` must not revert
+///                                    on realistic large positions.
+///
+///         Previously the R8 tests simulated the failure by clearing the
+///         router-to-FeeCollector approval. That only proved "the fee path
+///         can fail if approval is missing" — it neither exercised the
+///         blocklist/pause semantics USDC actually implements nor proved that
+///         a real Circle action would halt withdrawals. The mock now carries
+///         an adversarial blocklist + pause, so these tests exercise the
+///         real-world condition directly.
 contract FindingsValidation is TestBase {
     uint256 constant DEPOSIT = 10_000e6;
 
@@ -19,85 +43,73 @@ contract FindingsValidation is TestBase {
         router.deposit(DEPOSIT, alice);
         vm.stopPrank();
 
-        // Simulate real Aave yield: aToken balance grows via rebasing
-        // (In production, Aave V3 aTokens rebase automatically)
-        aToken.mint(address(router), 500e6); // $500 yield over time
+        // Simulate Aave rebasing yield
+        aToken.mint(address(router), 500e6);
     }
 
     // ========================================================================
     //  FINDING R8: FeeCollector revert blocks ALL withdrawals
     //
     //  Real-world trigger: Circle blocklists the treasury multisig address.
-    //  This happened to Tornado Cash addresses in 2022. Circle has the
-    //  power to blocklist ANY address on USDC.
+    //  Happened to Tornado Cash-associated addresses in 2022. Circle can
+    //  blocklist ANY address on USDC.
     //
     //  When the treasury is blocklisted:
     //    - FeeCollector.collectFee() calls USDC.safeTransferFrom(router, treasury, fee)
-    //    - USDC.transfer to a blocklisted address reverts
-    //    - The entire withdraw() reverts
-    //    - NO user can exit their position
+    //    - USDC enforces `require(!blocklisted[to])` and reverts
+    //    - The router's withdraw() reverts
+    //    - NO user can exit a yield-earning position
     //
     //  This is the only non-vault external call in withdraw() that has
     //  no fallback. Aave/Morpho reverts have ExitRedirected. Fee doesn't.
     // ========================================================================
 
-    /// @notice Simulates Circle blocklisting the treasury address.
-    ///         After blocklist, all withdrawals fail.
+    /// @notice Treasury is blocklisted on USDC. Withdrawals that would charge
+    ///         a fee revert with `BlocklistedRecipient(treasury)` — the exact
+    ///         selector canonical USDC would use on mainnet.
     function test_R8_treasuryBlocklisted_allWithdrawalsFail() public {
         uint256 shares = dvUsdc.balanceOf(alice);
 
-        // Simulate USDC blocklist on treasury: transfers TO treasury revert.
-        // In real USDC, Circle calls `blacklist(address)` on their admin contract.
-        // We simulate this by making the treasury unable to receive USDC.
-        //
-        // The most realistic simulation: deploy a contract at the treasury
-        // address that rejects incoming USDC. But since treasury is an EOA
-        // Simulated by removing ALL USDC approval from router
-        // to feeCollector (which has the same effect: safeTransferFrom fails).
-        //
-        // Why this is realistic: if Circle's USDC contract adds a
-        // `require(!blacklisted[to])` check (which real USDC has), any
-        // transfer to a blacklisted treasury reverts identically.
-        vm.prank(address(router));
-        usdc.approve(address(feeCollector), 0);
+        // Circle blocklists the treasury. Any USDC transfer with to=treasury reverts.
+        usdc.setBlocklisted(treasury, true);
 
-        // Every user's withdrawal now fails - not just Alice
+        // The fee transfer inside collectFee() now reverts. Because the revert
+        // propagates through SafeERC20, the router bubbles up the original
+        // BlocklistedRecipient selector — the same one mainnet USDC emits.
         vm.prank(alice);
-        vm.expectRevert(); // safeTransferFrom fails
+        vm.expectRevert(abi.encodeWithSelector(MockERC20.BlocklistedRecipient.selector, treasury));
         router.withdraw(shares, alice, 0);
 
-        // Scenario: blocklisted treasury blocks all fee transfers, halting withdrawals.
-        // Documented in .audit/findings-to-fix.md as R8. Mitigated by try/catch on collectFee.
+        // R8 fix: wrap collectFee in try/catch; on blocklist, user gets the
+        // full gross and the skipped fee is an operational incident rather
+        // than a DoS. Tracked in .audit/findings-to-fix.md.
     }
 
-    /// @notice Simulates Circle pausing USDC globally (happened March 2023
-    ///         during SVB crisis). During a global pause, ALL USDC transfers
-    ///         fail. Deposits are already blocked (oracle goes stale), but
-    ///         withdrawals should still work per INV-5.
+    /// @notice Simulates Circle's global USDC pause (March 2023 SVB incident).
+    ///         Every transfer reverts with `TokenPaused()`. Withdrawals should
+    ///         still work per INV-5, but under the current code they don't
+    ///         because the fee path reverts.
     ///
-    ///         With the current code, the fee transfer also fails, blocking
-    ///         withdrawals. The fee try/catch fix would allow withdrawals
-    ///         to proceed (user gets full gross, fee skipped).
+    /// @dev Pins CURRENT broken behavior. When the R8 fix lands (try/catch
+    ///      around FEE_COLLECTOR.collectFee in withdraw), the assertion flips
+    ///      to `assertGt(usdcReturned, 0)` and the test name changes to
+    ///      reflect the restored permissionless-exit guarantee.
     function test_R8_usdcGlobalPause_withdrawalsShouldWorkButDont() public {
         uint256 shares = dvUsdc.balanceOf(alice);
 
-        // Simulate USDC global pause: no transfers work.
-        // In real USDC, Circle calls `pause()` on the contract.
-        // We simulate by setting ALL balances to 0 (transfers underflow).
-        // More realistic: remove router's approval to feeCollector.
-        vm.prank(address(router));
-        usdc.approve(address(feeCollector), 0);
+        // Circle pauses USDC globally. No transfer can succeed.
+        usdc.setTransfersPaused(true);
 
-        // Withdrawal fails because fee transfer fails
+        // Morpho path uses `usdc.transfer`; Aave's mock bypasses (it `mint`s
+        // USDC directly), but the fee's transferFrom in FeeCollector is
+        // always on the transfer path. Selector matches canonical paused-token
+        // semantics.
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(MockERC20.TokenPaused.selector);
         router.withdraw(shares, alice, 0);
-
-        // With the try/catch fix, this would succeed:
-        // user gets their full gross (principal + yield), fee is skipped.
     }
 
-    /// @notice Positive control: normal withdrawal with working fee path
+    /// @notice Positive control: normal withdrawal with working fee path.
     function test_R8_control_normalWithdrawalSucceeds() public {
         uint256 shares = dvUsdc.balanceOf(alice);
         uint256 balBefore = usdc.balanceOf(alice);
@@ -115,18 +127,16 @@ contract FindingsValidation is TestBase {
     //  Any party with a valid signature can submit it (not just the relayer).
     //  The wallet is still registered correctly. Nonce is consumed before
     //  sig validation (defense-in-depth: validate first, consume after).
-    //  See .audit/findings-to-fix.md for details.
     // ========================================================================
 
     /// @notice Proves that anyone with a valid initializeFor signature can
-    ///         submit it - not just the intended relayer. The wallet has no
+    ///         submit it — not just the intended relayer. The wallet has no
     ///         control over WHO submits the signature or WHEN.
     function test_R2_anyoneCanSubmitValidSig() public {
         (address victim, uint256 victimKey) = makeAddrAndKey("newUser");
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = router.nonces(victim);
 
-        // Victim creates a valid signature for gasless onboarding
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)"),
@@ -144,30 +154,23 @@ contract FindingsValidation is TestBase {
         vm.prank(thirdParty);
         router.initializeFor(victim, deadline, sig);
 
-        // Wallet is registered (signature was valid regardless of submitter)
         assertTrue(router.authorizedWallets(victim));
 
-        // The intended relayer's tx now fails (wallet already registered)
+        // Re-submission now fails (wallet already registered)
         address relayer = makeAddr("relayer");
         vm.prank(relayer);
         vm.expectRevert(abi.encodeWithSignature("WalletAlreadyAuthorised()"));
         router.initializeFor(victim, deadline, sig);
     }
 
-    /// @notice Proves nonce ordering: nonce is incremented at line 273
-    ///         BEFORE signature check at line 281. While Solidity reverts
-    ///         roll back state, the code pattern is non-standard compared
-    ///         to OpenZeppelin's EIP-2612 (which validates first).
+    /// @notice Pins the non-standard nonce-ordering: nonce is incremented
+    ///         (line 273) BEFORE signature check (line 281). On revert, state
+    ///         rolls back, so nonce is unchanged. Non-standard vs OZ
+    ///         ERC20Permit but no practical exploit.
     function test_R2_nonceOrderingIsNonStandard() public {
-        // Nonce increment at line 273 happens before ECDSA.recover at line 281.
-        // OZ's ERC20Permit validates first, then consumes nonce.
-        // On revert, state rolls back, so no practical impact.
-        // On revert, state rolls back so nonce is unchanged.
-
         address newWallet = makeAddr("orderingTest");
         uint256 nonceBefore = router.nonces(newWallet);
 
-        // Invalid sig - reverts, nonce rolls back
         vm.expectRevert();
         router.initializeFor(
             newWallet,
@@ -182,52 +185,35 @@ contract FindingsValidation is TestBase {
     //  FINDING R5: previewWithdrawNet overflow on extreme inputs
     //
     //  Real-world trigger: a whale with a very large position tries to
-    //  preview their withdrawal in a frontend or via the SDK. The view
-    //  function reverts instead of returning a result.
-    //
-    //  With Divigent's TVL cap removed after day 91, positions of $10M+
-    //  are realistic. The overflow doesn't require malicious input - just
-    //  a large legitimate position.
+    //  preview their withdrawal. The view should return a valid result,
+    //  not revert from uint256 overflow in the 4-way numerator.
     // ========================================================================
 
-    /// @notice Proves that a legitimate large position causes previewWithdrawNet
-    ///         to behave unexpectedly. The view function should never revert
-    ///         for valid positions.
-    function test_R5_largePosition_previewMayOverflow() public {
-        // Remove TVL cap (day 91+)
-        vm.warp(block.timestamp + 92 days);
+    /// @notice R5 regression: previewWithdrawNet must NOT revert for
+    ///         legitimate large positions. The fix wraps the 4-way numerator
+    ///         in OZ `Math.mulDiv` (512-bit intermediate) so the product can
+    ///         exceed 2^256 safely.
+    function test_R5_largePosition_previewDoesNotOverflow() public {
+        vm.warp(block.timestamp + 92 days); // Day 91+ removes TVL cap
 
-        // Create a $10M position (realistic for institutional agent)
         uint256 whale = 10_000_000e6;
         usdc.mint(alice, whale);
-        usdc.mint(address(aToken), whale * 2); // Aave liquidity
+        usdc.mint(address(aToken), whale * 2);
 
         vm.startPrank(alice);
         usdc.approve(address(router), whale);
         router.deposit(whale, alice);
         vm.stopPrank();
 
-        // Preview the full withdrawal - should return valid shares
-        uint256 totalPosition = whale + DEPOSIT; // from setUp + whale
+        uint256 walletShares = dvUsdc.balanceOf(alice);
+        uint256 totalPosition = whale + DEPOSIT;
 
-        // Test with the actual position value
-        try router.previewWithdrawNet(totalPosition, alice) returns (uint256 shares) {
-            assertGt(shares, 0, "Should return valid shares for the position");
-        } catch {
-            // If this catches, previewWithdrawNet overflowed on a legitimate
-            // $10M position - confirming the finding.
-            revert("previewWithdrawNet overflowed on $10M position - Finding R5 confirmed");
-        }
+        uint256 sharesAtPosition = router.previewWithdrawNet(totalPosition, alice);
+        assertGt(sharesAtPosition, 0, "preview returns non-zero for servable position");
+        assertLe(sharesAtPosition, walletShares, "preview caps at walletShares");
 
-        // Now test with an amount that pushes the internal multiplication
-        // closer to uint256 limits. Even type(uint128).max (~3.4e38) should
-        // not cause a view function to revert.
-        try router.previewWithdrawNet(type(uint128).max, alice) returns (uint256) {
-            // If it handles uint128.max, the math is reasonably safe
-        } catch {
-            // Overflow at uint128 scale - view function broke
-            assertTrue(true, "previewWithdrawNet overflowed at uint128 scale");
-        }
+        uint256 sharesAtMax = router.previewWithdrawNet(type(uint128).max, alice);
+        assertEq(sharesAtMax, walletShares, "uint128-max desiredNet caps at walletShares");
     }
 
     // ========================================================================

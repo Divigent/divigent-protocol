@@ -9,6 +9,7 @@ import {DivigentFeeCollector} from "../../src/DivigentFeeCollector.sol";
 import {DvUSDC} from "../../src/dvUSDC.sol";
 import {DivigentYieldOracle} from "../../src/DivigentYieldOracle.sol";
 import {IDivigentYieldOracle} from "../../src/interfaces/IDivigentYieldOracle.sol";
+import {IDivigentVaultRouter} from "../../src/interfaces/IDivigentVaultRouter.sol";
 
 import {MockAavePool} from "../mocks/MockAavePool.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -99,39 +100,100 @@ contract GapTests is TestBase {
         );
     }
 
-    // ─── 1.2 getCurrentAllocation ───────────────────────────────────────────
+    // ─── 1.2 getCurrentAllocation — state transitions, not static snapshot ──
 
-    function test_getCurrentAllocation_returnsZeroWhenEmpty() public view {
-        (uint256 aaveAssets, uint256 morphoAssets) = router.getCurrentAllocation();
-        assertEq(aaveAssets, 0);
-        assertEq(morphoAssets, 0);
-    }
+    /// @notice `getCurrentAllocation` must track the three observable states
+    ///         of the router's vault holdings end-to-end: empty, single-vault
+    ///         post-deposit, and drained back to near-empty post-withdraw.
+    ///         The sum must always equal `totalVaultAssets()` (consistency
+    ///         with Router-I invariant).
+    function test_getCurrentAllocation_transitionsAcrossFullLifecycle() public {
+        // State 1: empty → both legs at zero, totalVaultAssets = 0.
+        (uint256 aave0, uint256 morpho0) = router.getCurrentAllocation();
+        assertEq(aave0 + morpho0, router.totalVaultAssets(), "decomposition sums to total");
+        assertEq(aave0, 0, "Aave empty at deploy");
+        assertEq(morpho0, 0, "Morpho empty at deploy");
 
-    function test_getCurrentAllocation_reflectsDepositRouting() public {
+        // State 2: post-Aave-deposit → Aave populated, Morpho untouched.
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
         router.deposit(DEPOSIT, alice);
         vm.stopPrank();
 
-        (uint256 aaveAssets, uint256 morphoAssets) = router.getCurrentAllocation();
-        // Default oracle routes to Aave
-        assertGt(aaveAssets, 0, "Aave should have assets after deposit");
-        assertEq(morphoAssets, 0, "Morpho should be empty with Aave routing");
+        (uint256 aave1, uint256 morpho1) = router.getCurrentAllocation();
+        assertEq(aave1 + morpho1, router.totalVaultAssets(), "decomposition still sums");
+        assertApproxEqAbs(aave1, DEPOSIT, 2, "Aave leg holds the deposit");
+        assertEq(morpho1, 0, "Morpho untouched");
+
+        // State 3: post-yield → Aave grows, Morpho still empty.
+        aToken.mint(address(router), 500e6);
+        (uint256 aave2, uint256 morpho2) = router.getCurrentAllocation();
+        assertGt(aave2, aave1, "Aave leg grew with yield");
+        assertEq(morpho2, 0, "Morpho still untouched");
+
+        // State 4: post-withdraw → Aave drains back toward zero.
+        uint256 shares = dvUsdc.balanceOf(alice);
+        vm.prank(alice);
+        router.withdraw(shares, alice, 0);
+
+        (uint256 aave3, uint256 morpho3) = router.getCurrentAllocation();
+        assertEq(aave3 + morpho3, router.totalVaultAssets(), "decomposition still sums");
+        assertLt(aave3, aave2, "Aave drained by withdraw");
     }
 
-    // ─── 1.3 oracleStatus ───────────────────────────────────────────────────
+    // ─── 1.3 oracleStatus — staleness transition, not just fresh snapshot ───
 
-    function test_oracleStatus_returnsFreshAndTimestamp() public view {
-        (uint256 lastObs, bool fresh) = router.oracleStatus();
-        assertTrue(fresh, "Oracle should be fresh after setup");
-        assertGt(lastObs, 0, "Last observation should be non-zero");
+    /// @notice `oracleStatus.fresh` must flip in both directions: stale when
+    ///         time elapses past MAX_STALENESS, fresh again after a new
+    ///         observation. A purely static assertion that "fresh right after
+    ///         setup" is true proves nothing about the freshness logic itself.
+    function test_oracleStatus_flipsFreshOnStalenessTransition() public {
+        // Fresh initially (setUp recorded an observation).
+        (uint256 lastObs0, bool fresh0) = router.oracleStatus();
+        assertTrue(fresh0, "fresh at setup");
+        assertGt(lastObs0, 0, "observation timestamp non-zero");
+
+        // Warp past MAX_STALENESS (2 hours) → goes stale.
+        vm.warp(block.timestamp + 3 hours);
+        (uint256 lastObs1, bool fresh1) = router.oracleStatus();
+        assertFalse(fresh1, "stale after 3h with no observation");
+        assertEq(lastObs1, lastObs0, "lastObservationTime does not drift while stale");
+
+        // Record a fresh observation → fresh again, timestamp advances.
+        yieldOracle.recordObservation();
+        (uint256 lastObs2, bool fresh2) = router.oracleStatus();
+        assertTrue(fresh2, "fresh again after new observation");
+        assertGt(lastObs2, lastObs1, "lastObservationTime advanced");
     }
 
-    // ─── 1.4 getRecommendedRoute ────────────────────────────────────────────
+    // ─── 1.4 getRecommendedRoute — fallback under capacity constraint ───────
 
-    function test_getRecommendedRoute_returnsAaveByDefault() public view {
-        IDivigentYieldOracle.VaultType vt = router.getRecommendedRoute(DEPOSIT);
-        assertEq(uint8(vt), uint8(IDivigentYieldOracle.VaultType.AAVE));
+    /// @notice `getRecommendedRoute` must honour the amount-aware fallback:
+    ///         if the oracle-recommended vault can't fit the deposit, it
+    ///         returns the alternate vault. If neither fits, reverts
+    ///         `NoSafeRoute`. A static "returns Aave" test misses the entire
+    ///         fallback branch.
+    function test_getRecommendedRoute_fallsBackWhenAavePoolDry() public {
+        // Primary Aave route works when idle is ample.
+        assertEq(
+            uint8(router.getRecommendedRoute(DEPOSIT)),
+            uint8(IDivigentYieldOracle.VaultType.AAVE),
+            "primary recommends Aave with ample idle"
+        );
+
+        // Drain Aave idle → `_canAllocate(AAVE, DEPOSIT)` returns false.
+        // Morpho is still available, so the router falls back.
+        usdc.setBalance(address(aToken), 0);
+        assertEq(
+            uint8(router.getRecommendedRoute(DEPOSIT)),
+            uint8(IDivigentYieldOracle.VaultType.MORPHO),
+            "fallback to Morpho when Aave idle is empty"
+        );
+
+        // Cap Morpho too → neither works → reverts.
+        morphoVault.setMaxDeposit(0);
+        vm.expectRevert(abi.encodeWithSignature("NoSafeRoute(uint256)", DEPOSIT));
+        router.getRecommendedRoute(DEPOSIT);
     }
 
     // ─── 1.5 depositWithPermit ──────────────────────────────────────────────
@@ -222,8 +284,10 @@ contract GapTests is TestBase {
         // Drain Morpho capacity
         morphoVault.setMaxWithdraw(0);
 
+        // When both vaults report zero balance the router hits the
+        // totalHeld == 0 guard first and reverts with ZeroAmount.
         vm.prank(alice);
-        vm.expectRevert(); // InsufficientVaultLiquidity
+        vm.expectRevert(IDivigentVaultRouter.ZeroAmount.selector);
         router.withdraw(shares, alice, 0);
     }
 
@@ -326,9 +390,14 @@ contract GapTests is TestBase {
 
         uint256 shares = dvUsdc.balanceOf(alice);
 
-        // Operator tries to transfer alice's dvUSDC to themselves
+        // Operator tries to transfer alice's dvUSDC to themselves.
+        // No allowance was granted → OZ ERC20 fires InsufficientAllowance before
+        // the _update hook reaches the NonTransferable check. Either way the
+        // steal is blocked; we pin the outer selector here.
         vm.prank(operator_);
-        vm.expectRevert(); // NonTransferable
+        vm.expectPartialRevert(
+            bytes4(keccak256("ERC20InsufficientAllowance(address,uint256,uint256)"))
+        );
         dvUsdc.transferFrom(alice, operator_, shares);
     }
 
@@ -371,7 +440,7 @@ contract GapTests is TestBase {
         // Set minOut higher than what the position is worth
         uint256 unreasonableMinOut = DEPOSIT * 2;
 
-        vm.expectRevert(); // SlippageExceeded
+        vm.expectPartialRevert(IDivigentVaultRouter.SlippageExceeded.selector);
         router.withdraw(shares, alice, unreasonableMinOut);
         vm.stopPrank();
     }
@@ -433,7 +502,7 @@ contract GapTests is TestBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        vm.expectRevert(); // NoSafeRoute
+        vm.expectPartialRevert(IDivigentVaultRouter.NoSafeRoute.selector);
         router.deposit(DEPOSIT, alice);
         vm.stopPrank();
     }

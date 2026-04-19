@@ -150,6 +150,50 @@ contract ReentrancyTest is Test {
 
         assertEq(dvUsdc.balanceOf(alice), shares, "shares unchanged");
     }
+
+    /// @dev Read-only reentrancy: router view functions called from inside a
+    ///      Morpho callback must not revert, must return sensible values, and
+    ///      must stay within bounded envelopes of pre/post state. Catches the
+    ///      class of bug where a future refactor either (a) makes a view revert
+    ///      during mid-flight, or (b) produces catastrophic divergence (e.g.
+    ///      division-by-zero or unexpected zero), which downstream integrators
+    ///      would act on as if it were authoritative.
+    function test_reentrancy_readOnly_viewsObservableDuringCallback() public {
+        // Seed position
+        vm.prank(alice);
+        usdc.approve(address(router), 50_000e6);
+        vm.prank(alice);
+        router.deposit(50_000e6, alice);
+
+        // Snapshot pre-withdraw PPS (used as boundary for the mid-flight envelope check)
+        uint256 ppsBefore = router.pricePerShare();
+
+        // Arm read-only reentrance. During withdraw, the hostile vault's
+        // callback reads view functions and stores them — without reverting.
+        hostile.armReadOnlyReentrance();
+
+        // Partial withdraw (avoid supply=0 short-circuit in pricePerShare)
+        uint256 half = dvUsdc.balanceOf(alice) / 2;
+        vm.prank(alice);
+        router.withdraw(half, alice, 0);
+
+        // Retrieve what the hostile vault observed mid-flight
+        uint256 ppsMid = hostile.observedPps();
+        uint256 tvaMid = hostile.observedTva();
+        uint256 ppsAfter = router.pricePerShare();
+
+        // Views must be callable during reentrancy (no revert → captured non-zero)
+        assertGt(ppsMid, 0, "pps view observable mid-flight");
+        assertGt(tvaMid, 0, "tva view observable mid-flight");
+
+        // Mid-flight values bounded within a 50% envelope of pre/post — catches
+        // catastrophic divergence without pinning exact values (which depend on
+        // the CEI ordering in withdraw).
+        uint256 low = ppsBefore < ppsAfter ? ppsBefore : ppsAfter;
+        uint256 high = ppsBefore > ppsAfter ? ppsBefore : ppsAfter;
+        assertGe(ppsMid, low / 2, "mid-flight PPS >= 50% of min(pre, post)");
+        assertLe(ppsMid, high * 2, "mid-flight PPS <= 200% of max(pre, post)");
+    }
 }
 
 /// @dev MetaMorpho-shaped vault whose `withdraw` deliberately attempts to reenter
@@ -161,6 +205,9 @@ contract HostileMorpho {
     bool public reentranceArmed;
     bool public depositReentranceArmed;
     bool public crossFunctionArmed;
+    bool public readOnlyReentranceArmed;
+    uint256 public observedPps;
+    uint256 public observedTva;
 
     mapping(address => uint256) public balanceOf;
     uint256 public totalShares;
@@ -184,6 +231,10 @@ contract HostileMorpho {
 
     function armCrossFunctionReentrance() external {
         crossFunctionArmed = true;
+    }
+
+    function armReadOnlyReentrance() external {
+        readOnlyReentranceArmed = true;
     }
 
     // ----- 4626 view surface ---------------------------------------------
@@ -255,6 +306,13 @@ contract HostileMorpho {
             crossFunctionArmed = false;
             DivigentVaultRouter(router).deposit(1000e6, owner_);
             revert("HostileMorpho: cross-function reentrance was NOT blocked");
+        }
+        if (readOnlyReentranceArmed) {
+            readOnlyReentranceArmed = false;
+            // Read-only reentrancy probe: view functions must not revert.
+            observedPps = DivigentVaultRouter(router).pricePerShare();
+            observedTva = DivigentVaultRouter(router).totalVaultAssets();
+            // Do NOT revert — allow the outer withdraw to proceed.
         }
         shares = (assets * totalShares + totalAssets_ - 1) / totalAssets_;
         balanceOf[owner_] -= shares;
