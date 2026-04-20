@@ -97,12 +97,17 @@ contract TinySupplyDonationTest is Actions {
         // the attacker just hurt themselves.
         uint256 victimReturn = userWithdraws(victim, victimShares);
 
-        // Victim recovers close to their 50k principal. A tiny rounding drift
-        // (a few thousand wei on a 50k position) is absorbed by share-math
-        // floors accumulated across attacker deposit → donation → victim
-        // deposit → attacker redeem → victim redeem. 0.01 USDC tolerance is
-        // well below any recovered amount that would indicate actual theft.
-        assertApproxEqAbs(victimReturn, 50_000e6, 10_000, "victim recovers principal within rounding");
+        // Victim recovers close to their 50k principal. Under the donation
+        // attack the attacker inflates PPS ~10_000× before the victim
+        // deposits; each 1-wei virtual-offset floor in victim-shares
+        // amplifies to ~O(inflated PPS) wei in victim-USDC output. Observed
+        // drift across (attacker deposit → donation → victim deposit →
+        // attacker redeem → victim redeem) is ~3.7k wei. Tolerance of 5k
+        // wei (0.005 USDC) is 1.4× the arithmetic bound — tight enough to
+        // flag any real siphon (≥0.01 USDC would fail), loose enough to
+        // absorb legitimate PPS-amplified floor drift. The earlier 10_000
+        // wei bound left double headroom; 5_000 halves that.
+        assertApproxEqAbs(victimReturn, 50_000e6, 5_000, "victim recovers principal within PPS-amplified floor drift");
 
         // Silence unused-warning for the initial capital snapshots
         // (retained for debug-on-failure visibility).

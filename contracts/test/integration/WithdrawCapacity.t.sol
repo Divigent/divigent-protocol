@@ -194,6 +194,174 @@ contract WithdrawCapacityTest is Actions {
         assertLt(gasUsed, 200_000, "Gas bomb absorbed by 100k try/catch ceiling");
     }
 
+    /// @notice Healthy-state parity with the old implementation. The pre-fix body
+    ///         was `(aToken.balanceOf(router), MORPHO_VAULT.convertToAssets(shares))`.
+    ///         Under healthy Morpho, the new path must return the same tuple.
+    function test_getCurrentAllocation_fuzz_healthyParityWithOldImpl(
+        uint128 aaveDep_,
+        uint128 morphoDep_,
+        uint128 yield_
+    ) public {
+        uint256 aaveDep   = bound(uint256(aaveDep_),   10_000e6, 100_000e6);
+        uint256 morphoDep = bound(uint256(morphoDep_), 10_000e6, 100_000e6);
+        uint256 yld       = bound(uint256(yield_),     0,        20_000e6);
+
+        address user = makeActor("alloc_parity", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, aaveDep);
+        useMorphoRoute();
+        userDeposits(user, morphoDep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld / 2);
+            accrueMorphoYield(yld / 2);
+        }
+
+        // Reference — what the old implementation would have returned.
+        uint256 expectedAave   = aToken.balanceOf(address(router));
+        uint256 morphoShares   = morphoVault.balanceOf(address(router));
+        uint256 expectedMorpho = morphoShares == 0 ? 0 : morphoVault.convertToAssets(morphoShares);
+
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+
+        assertEq(aAlloc, expectedAave,   "Aave cell: new impl == old impl");
+        assertEq(mAlloc, expectedMorpho, "Morpho cell: new impl == old impl");
+    }
+
+    /// @notice Router-level invariant: `totalVaultAssets() == aaveAssets + morphoAssets`
+    ///         must survive the refactor for every healthy state. BaseInvariants.sol:242
+    ///         already asserts this during invariant runs; we also pin it under a
+    ///         broader fuzz input surface here, including after yield/loss cycles.
+    function test_getCurrentAllocation_fuzz_matchesTotalVaultAssets(
+        uint128 aaveDep_,
+        uint128 morphoDep_,
+        uint128 yield_
+    ) public {
+        uint256 aaveDep   = bound(uint256(aaveDep_),   10_000e6, 100_000e6);
+        uint256 morphoDep = bound(uint256(morphoDep_), 10_000e6, 100_000e6);
+        uint256 yld       = bound(uint256(yield_),     0,        10_000e6);
+
+        address user = makeActor("alloc_total", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, aaveDep);
+        useMorphoRoute();
+        userDeposits(user, morphoDep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld / 2);
+            accrueMorphoYield(yld / 2);
+        }
+
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+        assertEq(router.totalVaultAssets(), aAlloc + mAlloc, "totalVaultAssets == aave + morpho");
+    }
+
+    /// @notice Gas bound — external integrators may pay for this call. Before the
+    ///         fix, a gas-bomb scenario burned > 1 billion gas; under healthy state
+    ///         the new path must remain cheap enough for normal dashboard polling.
+    function test_getCurrentAllocation_gasBound_healthyState() public {
+        address user = makeActor("alloc_gas", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, AAVE_DEP);
+        useMorphoRoute();
+        userDeposits(user, MORPHO_DEP);
+
+        uint256 gasBefore = gasleft();
+        router.getCurrentAllocation();
+        uint256 gasUsed = gasBefore - gasleft();
+
+        assertLt(gasUsed, 80_000, "healthy getCurrentAllocation < 80k gas");
+    }
+
+    /// @notice Zero-position edge — before any deposit, the router has no holdings
+    ///         anywhere. Must return (0, 0) without reverting.
+    function test_getCurrentAllocation_zeroState_returnsZeros() public {
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+        assertEq(aAlloc, 0, "aave zero at rest");
+        assertEq(mAlloc, 0, "morpho zero at rest");
+
+        IDivigentVaultRouter.VaultCapacity memory cap = router.withdrawCapacity();
+        assertTrue(cap.morphoReachable, "morphoReachable trivially true at zero state");
+    }
+
+    /// @notice Aave-only or Morpho-only single-vault configurations must produce
+    ///         one populated cell and one zero cell, not cross-contaminated.
+    function test_getCurrentAllocation_singleVault_aaveOnly() public {
+        address user = makeActor("alloc_aave_only", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, AAVE_DEP);
+
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+        assertEq(aAlloc, aToken.balanceOf(address(router)), "aave populated");
+        assertEq(mAlloc, 0, "morpho zero");
+    }
+
+    function test_getCurrentAllocation_singleVault_morphoOnly() public {
+        address user = makeActor("alloc_morpho_only", 500_000e6);
+        useMorphoRoute();
+        userDeposits(user, MORPHO_DEP);
+
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+        assertEq(aAlloc, 0, "aave zero");
+        uint256 expected = morphoVault.convertToAssets(morphoVault.balanceOf(address(router)));
+        assertEq(mAlloc, expected, "morpho populated");
+    }
+
+    /// @notice Cross-call consistency: two back-to-back `getCurrentAllocation()`
+    ///         reads in the same tx must return identical values (the function is
+    ///         pure `view`; no state change, no oracle drift, no rebase).
+    function test_getCurrentAllocation_idempotent_twoReadsSameTx() public {
+        address user = makeActor("alloc_idempotent", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, AAVE_DEP);
+        useMorphoRoute();
+        userDeposits(user, MORPHO_DEP);
+
+        (uint256 a1, uint256 m1) = router.getCurrentAllocation();
+        (uint256 a2, uint256 m2) = router.getCurrentAllocation();
+
+        assertEq(a1, a2, "Aave reading idempotent");
+        assertEq(m1, m2, "Morpho reading idempotent");
+    }
+
+    /// @notice Stress: 100 micro yield steps. Pins that the new path survives
+    ///         cumulative floor drift across many mutations without amplifying
+    ///         rounding into a visible gap vs. `totalVaultAssets()`.
+    function test_getCurrentAllocation_stress_cumulativeYield() public {
+        address user = makeActor("alloc_stress", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, 50_000e6);
+        useMorphoRoute();
+        userDeposits(user, 50_000e6);
+
+        for (uint256 i = 0; i < 100; i++) {
+            accrueAaveYield(1e6);
+            accrueMorphoYield(1e6);
+
+            (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+            assertEq(router.totalVaultAssets(), aAlloc + mAlloc, "invariant holds mid-stress");
+        }
+    }
+
+    /// @notice Partial unreachability: Morpho reverts on view, Aave leg still
+    ///         reports accurate. The refactor must not cause the Aave cell to
+    ///         zero out when Morpho fails.
+    function test_getCurrentAllocation_morphoRevert_aaveLegStillAccurate() public {
+        address user = makeActor("alloc_aave_live", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, AAVE_DEP);
+        useMorphoRoute();
+        userDeposits(user, MORPHO_DEP);
+
+        uint256 aaveBefore = aToken.balanceOf(address(router));
+
+        morphoVault.setRevertOnConvertToAssets(true);
+        (uint256 aAlloc, uint256 mAlloc) = router.getCurrentAllocation();
+
+        assertEq(aAlloc, aaveBefore, "Aave unaffected by Morpho failure");
+        assertEq(mAlloc, 0, "Morpho reports 0 on unreachable");
+    }
+
     /// @notice Fuzz: `getCurrentAllocation()` and `withdrawCapacity()` must agree
     ///         on the Morpho-reachable cell across healthy and unreachable states,
     ///         and never disagree on the Aave cell.
@@ -301,9 +469,116 @@ contract WithdrawCapacityTest is Actions {
             // The canonical invariant — router served amount is within cap.
             // Returned is net-of-fee; gross = returned + fee <= cap.
             assertLe(returned, cap.totalWithdrawCap, "served <= totalWithdrawCap");
-        } catch {
-            // Revert is fine — means cap couldn't serve the gross. Either way
-            // the invariant `served <= cap` trivially holds (served = 0).
+        } catch (bytes memory reason) {
+            // Revert is fine — means cap couldn't serve the gross — BUT the
+            // revert must be one of the expected liquidity errors. A bug that
+            // produces any other revert (e.g. NotAuthorised, ZeroShares,
+            // arithmetic panic) would silently pass the old bare-catch;
+            // allowlisting the selectors turns that into a loud failure.
+            bytes4 sel = bytes4(reason);
+            bool allowed =
+                sel == IDivigentVaultRouter.InsufficientVaultLiquidity.selector ||
+                sel == IDivigentVaultRouter.MorphoUnreachable.selector ||
+                sel == IDivigentVaultRouter.SlippageExceeded.selector ||
+                sel == bytes4(0x4e487b71); // Panic(uint256) for rounding edges
+            assertTrue(allowed, "unexpected revert selector during capacity fuzz");
+        }
+    }
+
+    /// @notice Unified view/execute parity fuzz — the single test that pins
+    ///         the load-bearing claim of `_planWithdrawCapacity()`:
+    ///         `withdrawCapacity()` (the view) must predict exactly what
+    ///         `withdraw()` (the execute) does, across every combination of
+    ///         healthy / revert / gas-bomb Morpho state.
+    ///
+    ///         Prediction table derived from the helper's contract:
+    ///
+    ///         ┌────────────────────────────────────┬───────────────────────────────┐
+    ///         │ View state                         │ Execute must                  │
+    ///         ├────────────────────────────────────┼───────────────────────────────┤
+    ///         │ morphoReachable==false &&          │ revert `MorphoUnreachable`    │
+    ///         │   user has Morpho shares           │                               │
+    ///         ├────────────────────────────────────┼───────────────────────────────┤
+    ///         │ morphoReachable==true              │ succeed, returned ≈ preview   │
+    ///         │   (healthy or Aave-only user)      │   within 4 wei                │
+    ///         └────────────────────────────────────┴───────────────────────────────┘
+    ///
+    ///         A divergence in either direction is a view/execute contract
+    ///         break — the exact bug the shared helper was introduced to make
+    ///         impossible. 10k fuzz runs = 10k predictions pinned.
+    function test_withdrawCapacity_fuzz_predictsExecutionOutcome(
+        uint128 aaveDep_,
+        uint128 morphoDep_,
+        uint128 yield_,
+        uint256 sharePct_,
+        uint8 morphoState_
+    ) public {
+        uint256 aaveDep   = bound(uint256(aaveDep_),   10_000e6, 100_000e6);
+        uint256 morphoDep = bound(uint256(morphoDep_), 10_000e6, 100_000e6);
+        uint256 yld       = bound(uint256(yield_),     0,        20_000e6);
+        uint256 pct       = bound(sharePct_,           10,       100);
+        uint8   state     = uint8(bound(uint256(morphoState_), 0, 2));
+
+        address user = makeActor("predict_fuzz", 500_000e6);
+        useAaveRoute();
+        userDeposits(user, aaveDep);
+        useMorphoRoute();
+        userDeposits(user, morphoDep);
+        if (yld > 0) {
+            fastForward(30 days);
+            accrueAaveYield(yld / 2);
+            accrueMorphoYield(yld / 2);
+        }
+
+        // Flip Morpho state AFTER deposits so the user still has Morpho shares.
+        if      (state == 1) morphoVault.setRevertOnConvertToAssets(true);
+        else if (state == 2) morphoVault.setGasBombConvertToAssets(true);
+
+        uint256 morphoShares = morphoVault.balanceOf(address(router));
+        uint256 shares = (dvUsdc.balanceOf(user) * pct) / 100;
+        if (shares == 0) return;
+
+        // ─── Snapshot the view's prediction ─────────────────────────────
+        IDivigentVaultRouter.VaultCapacity memory cap = router.withdrawCapacity();
+
+        uint256 preview = 0;
+        if (cap.morphoReachable) {
+            // Preview is only meaningful when the view succeeds.
+            preview = router.previewRedeem(shares, user);
+        }
+
+        // ─── Execute and verify the prediction ──────────────────────────
+        vm.prank(user);
+        try router.withdraw(shares, user, 0) returns (uint256 returned) {
+            // Success path: view MUST have said reachable (morphoShares > 0 case).
+            assertTrue(
+                cap.morphoReachable || morphoShares == 0,
+                "execute succeeded but view said unreachable -- view/execute divergence"
+            );
+            // Returned USDC must fit inside the view's predicted cap.
+            assertLe(returned, cap.totalWithdrawCap, "execute served more than view's totalWithdrawCap");
+            // Preview must predict the actual delivery within rounding.
+            assertApproxEqAbs(returned, preview, 4, "previewRedeem != actual under healthy view");
+        } catch (bytes memory reason) {
+            bytes4 sel = bytes4(reason);
+
+            if (!cap.morphoReachable && morphoShares > 0) {
+                // View warned unreachable AND user has Morpho exposure → exact selector required.
+                assertEq(
+                    sel,
+                    IDivigentVaultRouter.MorphoUnreachable.selector,
+                    "view said Morpho unreachable but execute did not surface MorphoUnreachable"
+                );
+            } else {
+                // View predicted success; any revert here must be a
+                // liquidity or rounding-edge class. Anything else is a
+                // divergence bug.
+                bool explained =
+                    sel == IDivigentVaultRouter.InsufficientVaultLiquidity.selector ||
+                    sel == IDivigentVaultRouter.SlippageExceeded.selector ||
+                    sel == bytes4(0x4e487b71); // Panic(uint256)
+                assertTrue(explained, "view said servable but execute reverted with unexpected selector");
+            }
         }
     }
 

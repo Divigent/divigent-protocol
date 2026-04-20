@@ -260,21 +260,27 @@ contract DivigentVaultRouterTest is Test {
     }
 
     /// @dev Fuzz invariant: for any valid (depositAmount, yield/loss, desiredNet),
-    ///      the shares returned by previewWithdrawNet must, when fed into the actual
-    ///      withdraw flow, deliver at least desiredNet (or hit the walletShares cap).
+    ///      the shares returned by previewWithdrawNet must, when fed into the
+    ///      actual withdraw flow, deliver at least desiredNet.
+    ///
+    ///      Bounds are chosen so that every input reaches the asserting branch
+    ///      — no silent early-returns on dust / cap / zero-shares. A 10k-USDC
+    ///      minimum deposit, ±20% max swing, and desired capped at 95% of
+    ///      position keep `positionValue`, `desired`, `predictedShares`, and
+    ///      `predictedShares < walletShares` all provably non-degenerate.
     function testFuzz_previewWithdrawNet_withdrawYieldsAtLeastDesired(
         uint128 depositAmount_,
         int16 yieldBps_,
         uint128 desiredNet_
     ) public {
-        uint256 depositAmount = bound(uint256(depositAmount_), MIN_DEPOSIT, 100_000e6);
-        // yieldBps in [-3000, +3000] bps ⇒ -30% drawdown to +30% gain
-        int256 yieldBps = int256(bound(int256(yieldBps_), -3000, 3000));
+        uint256 depositAmount = bound(uint256(depositAmount_), 10_000e6, 100_000e6);
+        // yieldBps in [-2000, +3000] bps ⇒ -20% drawdown to +30% gain.
+        // -20% on 10k min deposit ⇒ positionValue >= 8_000e6; never dust.
+        int256 yieldBps = int256(bound(int256(yieldBps_), -2000, 3000));
 
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
         uint256 shares = _deposit(alice, alice, depositAmount);
 
-        // Apply yield/loss
         if (yieldBps > 0) {
             uint256 gain = (depositAmount * uint256(yieldBps)) / BPS_DENOM;
             aToken.mint(address(router), gain);
@@ -283,20 +289,18 @@ contract DivigentVaultRouterTest is Test {
             aToken.burn(address(router), loss);
         }
 
-        // desiredNet bounded by what's realistically withdrawable
         uint256 positionValue = router.previewRedeem(shares, alice);
-        if (positionValue == 0) return;
-        uint256 desired = bound(uint256(desiredNet_), 1, positionValue);
+        assertGe(positionValue, 8_000e6, "positionValue lower-bounded by -20% on 10k min");
+
+        // Cap desired at 95% of positionValue so predictedShares never hits
+        // the wallet-shares ceiling (the old "capped, guarantee relaxed" escape).
+        uint256 desired = bound(uint256(desiredNet_), 1e6, (positionValue * 95) / 100);
 
         uint256 predictedShares = router.previewWithdrawNet(desired, alice);
-        if (predictedShares == 0) return;
-
-        // If capped, the guarantee is relaxed (user opted for max withdrawal)
-        if (predictedShares == dvUsdc.balanceOf(alice)) return;
+        assertGt(predictedShares, 0, "preview returned zero shares for non-dust desired");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "preview never hits cap under 95% bound");
 
         uint256 actualOut = router.previewRedeem(predictedShares, alice);
-
-        // Allow 1 wei floor-drift tolerance; anything worse is a real violation
         assertGe(actualOut + 1, desired, "actualOut < desired - 1 wei (preview underestimated)");
     }
 
@@ -431,6 +435,24 @@ contract DivigentVaultRouterTest is Test {
     // ─────────────────────────────────────────────────────────────────────────
     //  3. Operator authorisation
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev `setOperator(address(0), _)` must revert `ZeroAddress`. Before this
+    ///      test, the error at `DivigentVaultRouter.sol:291` was uncovered —
+    ///      a regression deleting the guard would have silently written
+    ///      `isOperator[wallet][0x0] = true/false`, polluting indexers and
+    ///      introducing a confused-deputy surface.
+    function test_setOperator_reverts_ZeroAddress() public {
+        vm.prank(alice);
+        vm.expectRevert(IDivigentVaultRouter.ZeroAddress.selector);
+        router.setOperator(address(0), true);
+
+        vm.prank(alice);
+        vm.expectRevert(IDivigentVaultRouter.ZeroAddress.selector);
+        router.setOperator(address(0), false);
+
+        // Mapping must remain clean.
+        assertFalse(router.isOperator(alice, address(0)), "no operator state written");
+    }
 
     /// @dev An approved operator can deposit and withdraw on behalf of a wallet.
     function test_operator_canDepositAndWithdraw() public {
@@ -750,6 +772,31 @@ contract DivigentVaultRouterTest is Test {
         // Allow 1 wei rounding tolerance throughout
         assertApproxEqAbs(feeCollected, yieldAmount / 10, 1, "Fee must be 10% of yield");
         assertApproxEqAbs(netYield, yieldAmount * 9 / 10, 1, "Net yield must be 90% of gross yield");
+    }
+
+    /// @dev Fee must be exactly 0 at the waterline — `actualGross == principalOut`
+    ///      to the wei. This pins the branch `actualGross > principalOut ? ... : 0`
+    ///      at its exact boundary. A regression flipping `>` to `>=` (or any
+    ///      off-by-one in the comparison) would charge a 10 bps fee on zero
+    ///      realised yield, violating INV-2 (principal preservation).
+    function test_fee_exactWaterline_zeroFee() public {
+        uint256 depositAmount = 10_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        // Force the Aave leg to hold EXACTLY the principal — no yield, no loss.
+        // setBalance directly pins the waterline; any fee here means the
+        // equality boundary was misclassified as "above waterline".
+        aToken.setBalance(address(router), depositAmount);
+
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+        assertEq(feeCollected, 0, "fee must be 0 at exact waterline");
+        assertApproxEqAbs(returned, depositAmount, 1, "principal returned in full");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

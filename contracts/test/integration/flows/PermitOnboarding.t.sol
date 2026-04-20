@@ -221,6 +221,23 @@ contract PermitOnboardingTest is Actions {
         assertEq(router.nonces(lateWallet), 0, "Expired sig did not consume nonce");
     }
 
+    /// @dev Boundary: `deadline == block.timestamp` must SUCCEED. The router
+    ///      checks `if (block.timestamp > deadline) revert PermitExpired` —
+    ///      a regression flipping this to `>=` would silently reject every
+    ///      permit submitted at the exact deadline second. Pins the inclusive
+    ///      semantics.
+    function test_initializeFor_succeedsWhenDeadlineEqualsNow() public {
+        (address exact, uint256 exactKey) = makeAddrAndKey("exact_boundary_onboard");
+
+        uint256 deadline = block.timestamp; // == not >
+        bytes memory sig = signInitializeFor(exactKey, exact, deadline);
+
+        router.initializeFor(exact, deadline, sig);
+
+        assertTrue(router.authorizedWallets(exact), "deadline == now must authorise");
+        assertEq(router.nonces(exact), 1, "nonce consumed on success");
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     // 5. depositWithPermit: revert paths
     //    (PermitExpired at the router layer is covered in DepositValidation.t.sol;

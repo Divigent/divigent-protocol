@@ -1,6 +1,6 @@
 # Divigent Protocol
 
-Non-custodial yield infrastructure for AI agent USDC on Base. Divigent
+Non-custodial yield infrastructure for AI agent holding USDC on Base. Divigent
 intercepts idle capital intervals in agent payment workflows and deploys them
 into audited DeFi lending protocols (Aave V3, Morpho Steakhouse USDC),
 generating yield proportional to idle duration.
@@ -26,8 +26,7 @@ generating yield proportional to idle duration.
 
 Divigent follows a router-oracle-token architecture where a single
 VaultRouter orchestrates all capital flows between agent wallets and two
-yield-bearing vaults (Aave V3 and Morpho MetaMorpho), guided by a
-time-weighted average rate oracle.
+yield-bearing pool / vaults (Aave V3 and Steakhouse USDC Prime MetaMorpho V1), guided by a time-weighted average rate oracle.
 
 ```text
 Agent Wallet

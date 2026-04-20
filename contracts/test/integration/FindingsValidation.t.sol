@@ -70,6 +70,18 @@ contract FindingsValidation is TestBase {
     function test_R8_treasuryBlocklisted_allWithdrawalsFail() public {
         uint256 shares = dvUsdc.balanceOf(alice);
 
+        // Pre-revert snapshot — atomicity is a load-bearing claim here; if the
+        // revert leaks partial state (dvUSDC burned, costBasis decremented,
+        // Aave pulled, router holds stray USDC), the test-bench would have
+        // been blind to it. Snapshot every mutable slot the withdraw touches.
+        (uint256 cbPre, , ) = router.getPosition(alice);
+        uint256 dvPre       = dvUsdc.balanceOf(alice);
+        uint256 aTokPre     = aToken.balanceOf(address(router));
+        uint256 morphoPre   = morphoVault.balanceOf(address(router));
+        uint256 routerPre   = usdc.balanceOf(address(router));
+        uint256 alicePre    = usdc.balanceOf(alice);
+        uint256 treasuryPre = usdc.balanceOf(treasury);
+
         // Circle blocklists the treasury. Any USDC transfer with to=treasury reverts.
         usdc.setBlocklisted(treasury, true);
 
@@ -79,6 +91,18 @@ contract FindingsValidation is TestBase {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(MockERC20.BlocklistedRecipient.selector, treasury));
         router.withdraw(shares, alice, 0);
+
+        // Post-revert: every slot must be bit-identical to pre-revert. This is
+        // the atomicity guarantee — if any one of these drifts, a blocklist
+        // event silently corrupts accounting across the protocol.
+        (uint256 cbPost, , ) = router.getPosition(alice);
+        assertEq(cbPost,                           cbPre,       "costBasis atomic");
+        assertEq(dvUsdc.balanceOf(alice),          dvPre,       "dvUSDC atomic");
+        assertEq(aToken.balanceOf(address(router)), aTokPre,    "aToken atomic");
+        assertEq(morphoVault.balanceOf(address(router)), morphoPre, "Morpho shares atomic");
+        assertEq(usdc.balanceOf(address(router)),  routerPre,   "router USDC atomic (INV-4)");
+        assertEq(usdc.balanceOf(alice),            alicePre,    "alice USDC atomic");
+        assertEq(usdc.balanceOf(treasury),         treasuryPre, "treasury USDC atomic");
 
         // R8 fix: wrap collectFee in try/catch; on blocklist, user gets the
         // full gross and the skipped fee is an operational incident rather
