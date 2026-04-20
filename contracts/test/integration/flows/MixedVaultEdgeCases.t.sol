@@ -51,18 +51,18 @@ contract MixedVaultEdgeCasesTest is Actions {
         assertApproxEqAbs(
             beforeWithdraw.aaveAssets - afterWithdraw.aaveAssets,
             49_500e6,
-            50e6,
+            10,
             "Aave side drop ~ 49.5k (proportional 99%)"
         );
         assertApproxEqAbs(
             beforeWithdraw.morphoAssets - afterWithdraw.morphoAssets,
             500e6,
-            50e6,
+            10,
             "Morpho side drop ~ 500 (proportional 1%)"
         );
 
         // Returned ~= 50k (principal) since no yield.
-        assertApproxEqAbs(returned, 50_000e6, 100e6, "Returned ~ 50k");
+        assertApproxEqAbs(returned, 50_000e6, 10, "Returned ~ 50k");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -89,12 +89,12 @@ contract MixedVaultEdgeCasesTest is Actions {
         ProtocolSnap memory afterWithdraw = snapProtocol();
 
         // Aave side drop ~ 500 (1% of 50k), Morpho side drop ~ 49.5k (99% of 50k).
-        assertApproxEqAbs(beforeWithdraw.aaveAssets - afterWithdraw.aaveAssets, 500e6, 50e6, "Aave drop ~ 500");
+        assertApproxEqAbs(beforeWithdraw.aaveAssets - afterWithdraw.aaveAssets, 500e6, 10, "Aave drop ~ 500");
         assertApproxEqAbs(
-            beforeWithdraw.morphoAssets - afterWithdraw.morphoAssets, 49_500e6, 50e6, "Morpho drop ~ 49.5k"
+            beforeWithdraw.morphoAssets - afterWithdraw.morphoAssets, 49_500e6, 10, "Morpho drop ~ 49.5k"
         );
 
-        assertApproxEqAbs(returned, 50_000e6, 100e6, "Returned ~ 50k");
+        assertApproxEqAbs(returned, 50_000e6, 10, "Returned ~ 50k");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -55,8 +55,8 @@ contract ExitRedirectTest is Actions {
 
         // Post-condition: Aave side dropped by ~50k, Morpho side untouched.
         (uint256 aaveAfter, uint256 morphoAfter) = router.getCurrentAllocation();
-        assertApproxEqAbs(aaveAfter, 0, 2e6, "Aave side drained to serve the full exit");
-        assertApproxEqAbs(morphoAfter, 50_000e6, 2e6, "Morpho side untouched (was 0-capacity)");
+        assertApproxEqAbs(aaveAfter, 0, 10, "Aave side drained to serve the full exit");
+        assertApproxEqAbs(morphoAfter, 50_000e6, 10, "Morpho side untouched (was 0-capacity)");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -81,8 +81,8 @@ contract ExitRedirectTest is Actions {
         assertGt(returned, 0, "exit returned positive amount");
 
         (uint256 aaveAfter, uint256 morphoAfter) = router.getCurrentAllocation();
-        assertApproxEqAbs(aaveAfter, 50_000e6, 2e6, "Aave side untouched (was 0-liquidity)");
-        assertApproxEqAbs(morphoAfter, 0, 2e6, "Morpho side drained to serve the full exit");
+        assertApproxEqAbs(aaveAfter, 50_000e6, 10, "Aave side untouched (was 0-liquidity)");
+        assertApproxEqAbs(morphoAfter, 0, 10, "Morpho side drained to serve the full exit");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ contract ExitRedirectTest is Actions {
         uint256 halfShares = dvUsdc.balanceOf(aliceR) / 2;
         uint256 returned = userWithdraws(aliceR, halfShares);
 
-        assertApproxEqAbs(returned, 50_000e6, 2e6, "Combined-partial exit delivers ~50k");
+        assertApproxEqAbs(returned, 50_000e6, 10, "Combined-partial exit delivers ~50k");
 
         // Critical: BOTH vault legs must have been touched (not just one fully).
         uint256 aaveAfter = aToken.balanceOf(address(router));
@@ -241,11 +241,11 @@ contract ExitRedirectTest is Actions {
                 = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, bool));
 
             // Proportional target: ~25k each (both legs equal pre-constraint)
-            assertApproxEqAbs(targetAave, 25_000e6, 1e6, "target Aave ~25k");
-            assertApproxEqAbs(targetMorpho, 25_000e6, 1e6, "target Morpho ~25k");
+            assertApproxEqAbs(targetAave, 25_000e6, 10, "target Aave ~25k");
+            assertApproxEqAbs(targetMorpho, 25_000e6, 10, "target Morpho ~25k");
 
             // Actual: all 50k came from Aave (Morpho fully constrained)
-            assertApproxEqAbs(actualAave, 50_000e6, 1e6, "actual Aave ~50k");
+            assertApproxEqAbs(actualAave, 50_000e6, 10, "actual Aave ~50k");
             assertEq(actualMorpho, 0, "actual Morpho 0");
 
             // shortLeg=true means Morpho was the short leg

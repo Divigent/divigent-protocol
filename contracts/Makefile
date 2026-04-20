@@ -49,30 +49,38 @@ test-fork-deposit:
 test-fork-withdraw:
 	BASE_RPC_URL=https://mainnet.base.org forge test --match-contract ForkWithdraw -vvv
 
-# ── Static Analysis ──────────────────────────────────────────────────────────
-
-.PHONY: slither echidna medusa
-
-slither:
-	slither src/ \
-		--solc-remaps "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/" \
-		--exclude-dependencies
-
-echidna:
-	echidna test/echidna/EchidnaVaultRouter.sol \
-		--contract EchidnaVaultRouter \
-		--config echidna.yaml \
-		--solc-args "--via-ir --optimize"
-
-medusa:
-	medusa fuzz --config medusa.json
-
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
-.PHONY: coverage
+.PHONY: coverage coverage-lcov coverage-html coverage-clean
 
+# Terminal summary (fast)
 coverage:
-	forge coverage --no-match-contract Fork
+	forge coverage --no-match-contract Fork --ir-minimum --report summary
+
+# Generate lcov.info (consumed by HTML generator / CI dashboards)
+coverage-lcov:
+	forge coverage --no-match-contract Fork --ir-minimum --report lcov
+	@echo "lcov.info written."
+
+# Generate an HTML dashboard (requires `lcov` / `genhtml` installed)
+coverage-html: coverage-lcov
+	@if ! command -v genhtml >/dev/null 2>&1; then \
+		echo "genhtml not found. Install:"; \
+		echo "  macOS:  brew install lcov"; \
+		echo "  Ubuntu: sudo apt install lcov"; \
+		exit 1; \
+	fi
+	genhtml lcov.info \
+		--output-directory coverage-html \
+		--title "Divigent Protocol Coverage" \
+		--legend \
+		--branch-coverage \
+		--ignore-errors category,inconsistent,corrupt
+	@echo "HTML coverage written to: coverage-html/index.html"
+
+coverage-clean:
+	rm -f lcov.info
+	rm -rf coverage-html
 
 # ── Snapshot ──────────────────────────────────────────────────────────────────
 
@@ -103,12 +111,12 @@ help:
 	@echo "    make test-fuzz          Solvency fuzz tests"
 	@echo "    make test-integration   Integration flow tests"
 	@echo ""
-	@echo "  Static Analysis"
-	@echo "    make slither            Run Slither"
-	@echo "    make echidna            Run Echidna (50k calls)"
-	@echo "    make medusa             Run Medusa"
+	@echo "  Coverage"
+	@echo "    make coverage           Terminal summary"
+	@echo "    make coverage-lcov      Generate lcov.info"
+	@echo "    make coverage-html      Generate HTML dashboard (requires lcov)"
+	@echo "    make coverage-clean     Remove coverage artifacts"
 	@echo ""
 	@echo "  Other"
-	@echo "    make coverage           Forge coverage report"
 	@echo "    make snapshot           Gas snapshot"
 	@echo ""

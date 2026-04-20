@@ -39,7 +39,7 @@ contract DivigentFeeCollectorTest is Test {
 
     function test_constructor_setsImmutables() public view {
         assertEq(address(collector.USDC()), address(usdc));
-        assertEq(collector.TREASURY(), treasury);
+        assertEq(collector.treasury(), treasury);
         assertEq(collector.VAULT_ROUTER(), address(this));
         assertEq(collector.FEE_BPS(), 1_000);
         assertEq(collector.BPS_DENOMINATOR(), 10_000);

@@ -26,7 +26,12 @@ import {DvUSDC} from "../src/dvUSDC.sol";
 ///           3. DivigentFeeCollector (needs router address for access control)
 ///           4. DvUSDC (needs router address for mint/burn gate)
 ///           5. DivigentVaultRouter (wires everything together)
-///           6. Post-deploy: verify addresses, seed oracle, write report
+///           6. Post-deploy: verify addresses, write report
+///              (Oracle is seeded by its own constructor — no on-chain
+///              observation call is possible in the deploy tx because
+///              the 5-minute MIN_OBSERVATION_INTERVAL would early-return.
+///              The first real observation must be recorded by a keeper
+///              in a follow-up tx, ≥5 minutes after deployment.)
 ///
 ///         Security:
 ///           - No proxy pattern. All contracts are immutable at deployment.
@@ -130,9 +135,6 @@ contract DeployBase is Script {
 
         require(address(router) == predictedRouter, "Router address mismatch");
 
-        // Step 6: Seed oracle with first observation
-        oracle.recordObservation();
-
         vm.stopBroadcast();
 
         // ── Post-deploy verification ─────────────────────────────────────────
@@ -200,7 +202,7 @@ contract DeployBase is Script {
 
         // Cross-contract wiring
         require(feeCollector.VAULT_ROUTER() == address(router), "FeeCollector router mismatch");
-        require(feeCollector.TREASURY() == treasury, "FeeCollector treasury mismatch");
+        require(feeCollector.treasury() == treasury, "FeeCollector treasury mismatch");
         require(dvUsdc.VAULT_ROUTER() == address(router), "dvUSDC router mismatch");
 
         // Oracle reads real rates

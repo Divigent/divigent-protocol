@@ -584,11 +584,15 @@ contract DivigentYieldOracleTest is TestBase {
         IDivigentYieldOracle.VaultRate[] memory ratesOverwrite = yieldOracle.getAllRates();
         uint256 twarAt49 = ratesOverwrite[0].twarRate;
 
-        // With a steady rate, all three TWARs should be approximately equal
-        // (small differences from the constructor's initial rate in early slots)
-        assertApproxEqRel(twarAt47, steadyRate, 0.15e18, "TWAR at 47 should approximate steady rate");
-        assertApproxEqRel(twarAt48, steadyRate, 0.15e18, "TWAR at 48 should approximate steady rate");
-        assertApproxEqRel(twarAt49, steadyRate, 0.15e18, "TWAR at 49 should approximate steady rate");
+        // With a steady rate, all three TWARs should be approximately equal.
+        // The partial-buffer case (47 slots) has a small residual skew from
+        // the constructor's initial aaveSpotRate observation; 1% covers that
+        // without hiding a logic regression. The full-buffer cases (48, 49)
+        // are exact windowed averages — tolerance could be tighter but 1%
+        // keeps the three assertions uniform.
+        assertApproxEqRel(twarAt47, steadyRate, 0.01e18, "TWAR at 47 should approximate steady rate");
+        assertApproxEqRel(twarAt48, steadyRate, 0.01e18, "TWAR at 48 should approximate steady rate");
+        assertApproxEqRel(twarAt49, steadyRate, 0.01e18, "TWAR at 49 should approximate steady rate");
     }
 
     function test_twar_multipleCycles_96observations() public {

@@ -208,10 +208,13 @@ contract PropertyFuzzTest is Actions {
         uint256 aaveDrop = aaveBefore - aaveAfter;
         uint256 morphoDrop = morphoBefore - morphoAfter;
 
-        // 1% relative tolerance covers rounding in the proportional-split
-        // divisions for realistic deposit sizes.
-        assertApproxEqRel(aaveDrop, (aaveBefore * bps) / 10_000, 0.01e18, "aave side drop proportional");
-        assertApproxEqRel(morphoDrop, (morphoBefore * bps) / 10_000, 0.01e18, "morpho side drop proportional");
+        // 0.01% relative tolerance — proportional-split math is a single
+        // mulDiv in the router; the mock uses mulDiv too (no double-flooring).
+        // Rounding is bounded to a few wei per leg, so at realistic deposit
+        // sizes (>= 10k USDC) 0.0001 relative (100 ppm) is well over the
+        // actual drift and catches any logic regression.
+        assertApproxEqRel(aaveDrop, (aaveBefore * bps) / 10_000, 0.0001e18, "aave side drop proportional");
+        assertApproxEqRel(morphoDrop, (morphoBefore * bps) / 10_000, 0.0001e18, "morpho side drop proportional");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

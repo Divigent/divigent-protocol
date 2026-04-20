@@ -384,18 +384,27 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // the yield calculation by measuring the delta, not the absolute balance.
         uint256 balanceBefore = USDC.balanceOf(address(this));
 
-        // Determine how much USDC to pull from each vault proportionally.
-        uint256 aaveBalance   = A_TOKEN.balanceOf(address(this));
-        uint256 morphoBalance = _morphoAssetsHeld();
+        // Single source of truth for capacity math — shared with the public
+        // `withdrawCapacity()` pre-flight view, so the pre-flight can never
+        // disagree with execution in the same block.
+        VaultCapacity memory cap = _planWithdrawCapacity();
+
+        // Strict check on the state-changing path: if Morpho's view path
+        // failed AND the router actually has Morpho exposure, we cannot
+        // value the position and must revert. SDKs can detect this ahead
+        // of time via `withdrawCapacity().morphoReachable == false`.
+        if (!cap.morphoReachable) revert MorphoUnreachable();
+
+        uint256 aaveBalance   = cap.aaveAssetsHeld;
+        uint256 morphoBalance = cap.morphoAssetsHeld;
         uint256 totalHeld     = aaveBalance + morphoBalance;
 
         if (totalHeld == 0) revert ZeroAmount(); // should never happen post-invariant-check
 
         // grossUSDC is the estimated withdrawal target (used for proportional split).
         // The actual received amount (actualGross) is measured after redemptions.
-        uint256 totalAssets_  = aaveBalance + morphoBalance; // == totalHeld
         uint256 totalSupply_  = DV_USDC.totalSupply() + shares; // restore pre-burn supply
-        uint256 grossUSDC     = _sharesToAssets(shares, totalAssets_, totalSupply_);
+        uint256 grossUSDC     = _sharesToAssets(shares, totalHeld, totalSupply_);
 
         // ── Plan: proportional target ─────────────────────────────────────────
         // The initial target is proportional to each vault's share of totalHeld.
@@ -413,17 +422,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             targetMorpho = grossUSDC - targetAave;
         }
 
-        // ── Capacity: what each vault can actually pay right now ─────────────
-        // Aave: the router holds `aaveBalance` of aTokens, but a V3 withdrawal
-        // can only return as much USDC as sits idle in the aToken contract.
-        // Morpho: wrapped in try/catch so a view hiccup becomes "unavailable"
-        // (0) rather than a hard revert. Additionally capped at our actual
-        // holdings. A misbehaving vault could report an unreasonably high
-        // maxWithdraw; capping at actual holdings prevents over-withdrawal.
-        uint256 aaveIdle  = USDC.balanceOf(address(A_TOKEN));
-        uint256 aaveCap   = aaveBalance < aaveIdle ? aaveBalance : aaveIdle;
-        uint256 morphoCap = _safeMorphoMaxWithdraw();
-        if (morphoCap > morphoBalance) morphoCap = morphoBalance;
+        // Capacity locals pulled from the plan struct for the redirect math.
+        uint256 aaveCap   = cap.aaveWithdrawCap;
+        uint256 morphoCap = cap.morphoWithdrawCap;
 
         // Early revert when no combination of the two can serve the ask.
         if (aaveCap + morphoCap < grossUSDC) {
@@ -670,14 +671,23 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     }
 
     /// @inheritdoc IDivigentVaultRouter
+    /// @dev Degrades gracefully when Morpho's view path is unreachable
+    ///      (revert or gas bomb). Routes through `_planWithdrawCapacity()`
+    ///      so the same 100k-gas try/catch that guards `withdraw()` also
+    ///      guards this informational view — external integrators can call
+    ///      this without risk of OOG'ing on a compromised Morpho vault.
+    ///      Callers that need to distinguish "0 Morpho holdings" from
+    ///      "Morpho unreachable" should read `withdrawCapacity()` which
+    ///      exposes the `morphoReachable` flag.
     function getCurrentAllocation()
         external
         view
         override
         returns (uint256 aaveAssets, uint256 morphoAssets)
     {
-        aaveAssets   = A_TOKEN.balanceOf(address(this));
-        morphoAssets = _morphoAssetsHeld();
+        VaultCapacity memory cap = _planWithdrawCapacity();
+        aaveAssets   = cap.aaveAssetsHeld;
+        morphoAssets = cap.morphoAssetsHeld;
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -724,6 +734,31 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     function unpauseDeposits() external override onlyEmergencyMultisig {
         depositsPaused = false;
         emit DepositsPaused(false);
+    }
+
+    // ── Emergency Treasury Rotation ──────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev Forwards to the FeeCollector. Router enforces authorization
+    ///      (`onlyEmergencyMultisig`); FeeCollector enforces the timelock,
+    ///      holds the state, and emits the lifecycle events from where the
+    ///      state changes.
+    function proposeTreasuryRotation(address newTreasury)
+        external
+        override
+        onlyEmergencyMultisig
+    {
+        FEE_COLLECTOR.proposeTreasuryRotation(newTreasury);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function executeTreasuryRotation() external override onlyEmergencyMultisig {
+        FEE_COLLECTOR.executeTreasuryRotation();
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function cancelTreasuryRotation() external override onlyEmergencyMultisig {
+        FEE_COLLECTOR.cancelTreasuryRotation();
     }
 
     // ── Internal: Share Maths ─────────────────────────────────────────────────
@@ -912,5 +947,66 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         } catch {
             return 0;
         }
+    }
+
+    // ── Internal: Withdraw-Capacity Planning ──────────────────────────────────
+
+    /// @dev Gas limit on Morpho view calls inside the capacity helper.
+    ///      Morpho's `convertToAssets` on Steakhouse USDC consumes ~5-15k
+    ///      under normal conditions. 100k gives 6-20x headroom while bounding
+    ///      the cost of a gas-bomb call (compromised vault, pathological
+    ///      allocator) to a predictable amount.
+    uint256 private constant _MORPHO_VIEW_GAS = 100_000;
+
+    /// @dev Canonical source of truth for withdraw-capacity math. Called by
+    ///      both `withdraw()` and `withdrawCapacity()` so the state-changing
+    ///      path and the pre-flight view can never disagree by construction.
+    ///
+    ///      Never reverts. If Morpho's `convertToAssets` fails or hits the
+    ///      gas limit, `morphoReachable` is set to false and Morpho-derived
+    ///      fields are zero. Callers that need to fail-strict (i.e.
+    ///      `withdraw()`) check the flag and revert `MorphoUnreachable`.
+    function _planWithdrawCapacity()
+        internal
+        view
+        returns (VaultCapacity memory cap)
+    {
+        cap.aaveAssetsHeld    = A_TOKEN.balanceOf(address(this));
+        cap.aaveIdleLiquidity = USDC.balanceOf(address(A_TOKEN));
+        cap.aaveWithdrawCap   = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
+            ? cap.aaveAssetsHeld
+            : cap.aaveIdleLiquidity;
+
+        uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
+        if (morphoShares == 0) {
+            // No exposure — vacuously reachable.
+            cap.morphoReachable = true;
+        } else {
+            try MORPHO_VAULT.convertToAssets{gas: _MORPHO_VIEW_GAS}(morphoShares)
+                returns (uint256 assets)
+            {
+                cap.morphoAssetsHeld = assets;
+                cap.morphoReachable  = true;
+            } catch {
+                // morphoAssetsHeld stays 0, morphoReachable stays false.
+            }
+        }
+
+        uint256 morphoMax = _safeMorphoMaxWithdraw();
+        cap.morphoWithdrawCap = cap.morphoAssetsHeld < morphoMax
+            ? cap.morphoAssetsHeld
+            : morphoMax;
+
+        cap.totalWithdrawCap = cap.aaveWithdrawCap + cap.morphoWithdrawCap;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function withdrawCapacity()
+        external
+        view
+        override
+        returns (VaultCapacity memory)
+    {
+        return _planWithdrawCapacity();
     }
 }

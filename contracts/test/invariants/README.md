@@ -85,15 +85,36 @@ non-dilution), and Operator-A (operator never accumulates USDC).
 
 ## Tolerance Model
 
+Every tolerance below is now calibrated against the **real protocol's
+arithmetic**, not the mock's arithmetic. `MockMorphoVault` uses
+`Math.mulDiv` (single-floor 512-bit intermediate) exactly like live
+MetaMorpho — so drift is bounded by 1 wei per Morpho view call, not
+`shares / SHARE_UNIT` wei. Earlier versions of this table carried a
+`morphoDrift` term in Router-A/B and a 100× looser `Accounting-B` bound
+that absorbed the mock's double-flooring; both were removed when the
+mock was corrected (2026-04-20). Tests now fail if real drift ever
+exceeds these bounds — they are not bug-hiders.
+
 | Invariant | Tolerance | Rationale |
 | --- | --- | --- |
-| Router-A (aggregate solvency) | `fees + losses + ops * 2 wei` | Virtual offset + external loss + per-op rounding |
-| Router-B (per-user solvency) | `fees + yield + losses + ops * 2 wei` | Same, plus yield/fees that may have exited |
-| Router-N (underwater exit fee) | 2 wei margin on underwater check | Rounding in `_sharesToAssets` + withdraw-time recompute |
-| Accounting-B (net flow) | `ops * 1e3 + 1e6` | Cumulative rounding across all handlers |
-| Accounting-D (exact fee closure) | `ops * 2 wei` | Per-withdraw fee + gross flooring |
-| Accounting-E (non-dilution) | 2 wei per actor | Floor in preview math |
-| ShareAsset-A (supply * PPS) | 1 USDC (1e6) | Standard ERC-4626 rounding |
+| Router-A (aggregate solvency) | `fees + losses + ops * 2 wei` | Fees & losses legitimately leave the vault; `ops * 2 wei` absorbs the router's virtual-offset flooring in share math. |
+| Router-B (per-user solvency) | `fees + yield + losses + ops * 2 wei` | Same shape as Router-A, plus yield that may have exited the vault via prior withdraws. |
+| Router-N (underwater exit fee) | 2 wei margin on underwater check | Rounding in `_sharesToAssets` + withdraw-time recompute. |
+| Accounting-B (net flow) | `ops * 1e3 + 1e6` | Compounded virtual-offset rounding across deposit/withdraw/yield/loss steps. Baseline `1e6` absorbs initial-state dust. |
+| Accounting-D (exact fee closure) | `ops * 2 wei` | Per-withdraw fee + gross flooring (exact per-tx, linear in ops). |
+| Accounting-E (non-dilution) | 2 wei per actor | Floor in preview math per evaluation. |
+| ShareAsset-A (supply * PPS) | 1 USDC (1e6) | Standard ERC-4626 virtual-offset rounding. |
+
+### Design note on tolerance philosophy
+
+Tolerances exist for **unavoidable rounding** (integer division truncates
+remainders), not for **test-fixture imprecision**. The April 2026 audit
+pass removed several tolerance terms and tightened bounds 100×–1,000,000×
+after fixing `MockMorphoVault` to use `Math.mulDiv`. If a future change
+introduces real drift beyond what the table above allows, the invariants
+will flag it — by design. When tempted to loosen a tolerance, first
+check whether the drift is a test-fixture artifact or a protocol change
+that deserves to fail loudly.
 
 ## Handler Action Space
 
@@ -133,16 +154,27 @@ test/invariants/
 
 ## Running
 
+Foundry's invariant runner uses **runs × depth** — each run is a fresh
+state, and each run executes `depth` random handler calls before
+evaluating the invariants. Defaults (unset in `foundry.toml`): 256 runs,
+500 depth → ~128,000 handler calls per invariant per `forge test` pass.
+
 ```bash
-# Standard run (256 sequences, 16 calls each)
+# Standard run — Foundry defaults (256 runs × 500 calls)
 forge test --match-contract InvariantTest -vv
 
-# Deep run (10k sequences)
-forge test --match-contract InvariantTest -vvvv --fuzz-runs 10000
+# Deeper run — 1000 runs × 1000 calls (~1M handler calls per invariant)
+forge test --match-contract InvariantTest -vvvv \
+    --invariant-runs 1000 --invariant-depth 1000
 
 # Single invariant
 forge test --match-test invariant_router_N -vv
 
-# All-in-one (one check per sequence — fastest, loses per-invariant attribution)
+# All-in-one (one check per sequence — fastest for CI, loses per-invariant attribution)
 forge test --match-test invariant_ALL -vv
 ```
+
+Override defaults permanently via a `[profile.default.invariant]`
+section in `foundry.toml`; the protocol's committed config leaves them
+at Foundry defaults because ~128k calls already surfaces every
+adversarial path the handler graph generates.

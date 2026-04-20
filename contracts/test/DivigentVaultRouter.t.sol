@@ -852,8 +852,12 @@ contract DivigentVaultRouterTest is Test {
 
     /// @dev convertToShares and convertToAssets must be approximate inverses.
     function test_convertRoundTrip(uint96 rawAssets) public {
-        vm.assume(rawAssets >= 1e6 && rawAssets <= 100_000e6);
-        uint256 assets = uint256(rawAssets);
+        // Use `bound` rather than `vm.assume`. The range [1e6, 1e11] covers
+        // ~10^-18 of the uint96 type domain, so `vm.assume` exhausts its
+        // 65_536 rejection budget before the test completes any runs under
+        // coverage-instrumented execution (different fuzz seed distribution).
+        // `bound` maps the input into range deterministically — zero rejections.
+        uint256 assets = bound(uint256(rawAssets), 1e6, 100_000e6);
 
         _deposit(alice, alice, 10_000e6); // ensure non-trivial pool state
 

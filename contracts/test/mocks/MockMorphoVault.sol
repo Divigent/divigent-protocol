@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {MockERC20} from "./MockERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract MockMorphoVault {
     uint256 private constant SHARE_UNIT = 1e18;
@@ -24,8 +25,17 @@ contract MockMorphoVault {
     bool public driftOnNextWithdraw;
     uint256 public driftCapTo;
 
+    /// @dev View-path failure hooks for the withdraw-capacity resilience
+    ///      tests. `revertOnConvertToAssets` makes the view revert with a
+    ///      plain require; `gasBombConvertToAssets` burns gas in an
+    ///      infinite loop, exercising the try/catch gas-limit path.
+    bool public revertOnConvertToAssets;
+    bool public gasBombConvertToAssets;
+
     function setSilentFailWithdraw(bool fail) external { silentFailWithdraw = fail; }
     function setSilentFailDeposit(bool fail) external { silentFailDeposit = fail; }
+    function setRevertOnConvertToAssets(bool fail) external { revertOnConvertToAssets = fail; }
+    function setGasBombConvertToAssets(bool bomb) external { gasBombConvertToAssets = bomb; }
 
     /// @notice Arm the drift hook. View calls (`maxWithdraw`, `totalAssets`)
     ///         still return the pre-drift state, so the router plans based
@@ -68,6 +78,12 @@ contract MockMorphoVault {
     }
 
     function convertToAssets(uint256 shares) external view returns (uint256 assets) {
+        if (revertOnConvertToAssets) revert("MockMorphoVault: convertToAssets disabled");
+        if (gasBombConvertToAssets) {
+            // Burn gas until the try/catch ceiling is hit, forcing the caller's
+            // catch branch to execute. Used to test `_MORPHO_VIEW_GAS` bounds.
+            while (true) {}
+        }
         return _sharesToAssets(shares);
     }
 
@@ -188,28 +204,52 @@ contract MockMorphoVault {
         // 1e6 = 1 USDC per share. With SHARE_UNIT=1e18, this gives 18-decimal shares
         // matching real MetaMorpho: deposit(1000e6) → 1000e18 shares.
         if (totalShares == 0) return 1e6;
-        return (totalAssets_ * SHARE_UNIT) / totalShares;
+        return Math.mulDiv(totalAssets_, SHARE_UNIT, totalShares);
     }
 
     function _currentTotalAssets() internal view returns (uint256) {
         if (useManualSharePrice) {
             if (totalShares == 0) return manualSharePrice;
-            return (totalShares * manualSharePrice) / SHARE_UNIT;
+            return Math.mulDiv(totalShares, manualSharePrice, SHARE_UNIT);
         }
         return totalAssets_;
     }
 
+    // Share math uses `Math.mulDiv` (OZ 512-bit intermediate, single floor at
+    // the end) to match real MetaMorpho's precision. Previously the mock
+    // computed share price separately and then re-multiplied — two flooring
+    // operations compounded to `shares / SHARE_UNIT` wei of drift per call,
+    // which forced invariant tolerances to absorb a mock-specific artifact
+    // that doesn't exist in live MetaMorpho. With single-floor semantics the
+    // drift bound is constant (≤1 wei per call), so the invariant tolerances
+    // can track real protocol behaviour rather than test-fixture imprecision.
     function _assetsToShares(uint256 assets) internal view returns (uint256 shares) {
-        uint256 sharePrice = _currentSharePrice();
-        shares = (assets * SHARE_UNIT) / sharePrice;
+        if (useManualSharePrice) {
+            return Math.mulDiv(assets, SHARE_UNIT, manualSharePrice);
+        }
+        if (totalShares == 0) {
+            return Math.mulDiv(assets, SHARE_UNIT, 1e6);
+        }
+        return Math.mulDiv(assets, totalShares, totalAssets_);
     }
 
     function _assetsToSharesRoundUp(uint256 assets) internal view returns (uint256 shares) {
-        uint256 sharePrice = _currentSharePrice();
-        shares = (assets * SHARE_UNIT + sharePrice - 1) / sharePrice;
+        if (useManualSharePrice) {
+            return Math.mulDiv(assets, SHARE_UNIT, manualSharePrice, Math.Rounding.Ceil);
+        }
+        if (totalShares == 0) {
+            return Math.mulDiv(assets, SHARE_UNIT, 1e6, Math.Rounding.Ceil);
+        }
+        return Math.mulDiv(assets, totalShares, totalAssets_, Math.Rounding.Ceil);
     }
 
     function _sharesToAssets(uint256 shares) internal view returns (uint256 assets) {
-        assets = (shares * _currentSharePrice()) / SHARE_UNIT;
+        if (useManualSharePrice) {
+            return Math.mulDiv(shares, manualSharePrice, SHARE_UNIT);
+        }
+        if (totalShares == 0) {
+            return Math.mulDiv(shares, 1e6, SHARE_UNIT);
+        }
+        return Math.mulDiv(shares, totalAssets_, totalShares);
     }
 }

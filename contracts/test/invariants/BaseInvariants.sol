@@ -106,15 +106,11 @@ abstract contract BaseInvariants is Test {
         // External losses (aToken burn, Morpho TVA deflation) legitimately reduce
         // totalAssets without reducing sumCostBasis. Allow loss as deficit budget.
         uint256 totalLoss = _yieldHandler.totalLossAccrued();
-        // Morpho convertToAssets floors twice (price, then value). Worst-case
-        // drift per evaluation is `morphoShares / SHARE_UNIT` wei — the scale
-        // where the price-floor lost fraction becomes a whole wei after the
-        // share multiplication. Without this term, Router-A false-alarms on
-        // large Morpho positions where the router's reported totalVaultAssets
-        // under-reports fair value by a bounded amount.
-        uint256 morphoShares = _morphoVault.balanceOf(address(_router));
-        uint256 morphoDrift = morphoShares / 1e18;
-        uint256 tolerance = totalFees + totalLoss + morphoDrift + ops * 2;
+        // `ops * 2 wei` absorbs the virtual-offset flooring in the router's
+        // own share math (+1 offset loses at most 1-2 wei per deposit/withdraw).
+        // Morpho share math is single-floored via mulDiv (≤1 wei per call) so
+        // no separate morphoDrift term is needed.
+        uint256 tolerance = totalFees + totalLoss + ops * 2;
 
         assertGe(
             totalAssets + tolerance,
@@ -143,12 +139,6 @@ abstract contract BaseInvariants is Test {
         uint256 ops = _depositHandler.depositCount()
             + _withdrawHandler.withdrawCount()
             + _permitHandler.permitDepositCount();
-        // Same Morpho share-floor drift as Router-A (see its comment). For
-        // per-user solvency, this drift manifests as totalAssets_ being
-        // pessimistically under-reported, which scales the per-user
-        // currentValue down; the tolerance absorbs that.
-        uint256 morphoShares = _morphoVault.balanceOf(address(_router));
-        uint256 morphoDrift = morphoShares / 1e18;
 
         for (uint256 i = 0; i < _allActors.length; i++) {
             uint256 shares = _dvUsdc.balanceOf(_allActors[i]);
@@ -158,8 +148,8 @@ abstract contract BaseInvariants is Test {
             uint256 costBasis = _router.costBasisUSDC(_allActors[i]);
 
             // Tolerance: fees that left + yield that could have left + external
-            // losses that reduced vault value + Morpho share-floor drift + rounding.
-            uint256 tolerance = totalFees + totalYield + totalLoss + morphoDrift + ops * 2;
+            // losses that reduced vault value + per-op virtual-offset rounding.
+            uint256 tolerance = totalFees + totalYield + totalLoss + ops * 2;
 
             assertGe(
                 currentValue + tolerance,
@@ -709,16 +699,13 @@ abstract contract BaseInvariants is Test {
             + _operatorHandler.operatorDepositCount()
             + _operatorHandler.operatorWithdrawCount()
             + _permitHandler.permitDepositCount();
-        // Tolerance scales per op. Historical calibration (`1e3 per op`) was
-        // calibrated for a narrower handler action space; the expanded suite
-        // (adding LiquidityHandler + operator withdrawal cycles) reaches
-        // state sequences where interleaved Morpho-loss/yield/deposit steps
-        // compound share-math flooring across both the MetaMorpho mock and
-        // the router's virtual-offset share math. Empirical worst-case drift
-        // observed ~32k wei/op. `1e5 per op + 10 USDC` is a conservative
-        // upper bound on compound rounding — still far below any real
-        // accounting leak, which would drift by orders of magnitude more.
-        uint256 tolerance = ops * 1e5 + 1e7;
+        // Tolerance scales per op. 1e3 wei per op captures compounded
+        // virtual-offset rounding across deposits/withdraws/yield/loss steps
+        // in the handler graph. Baseline 1e6 wei absorbs initial-state dust.
+        // Morpho's share math now uses `Math.mulDiv` in the mock (matching
+        // real MetaMorpho — single-floor), so the tolerance does not need
+        // to absorb mock-specific compounding.
+        uint256 tolerance = ops * 1e3 + 1e6;
 
         // Losses are an outflow (external value destruction in Aave/Morpho).
         uint256 totalOut = withdrawn + fees + losses;
