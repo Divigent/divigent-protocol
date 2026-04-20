@@ -396,30 +396,6 @@ The deployment resolves the circular dependency between
 the router's future CREATE address via nonce arithmetic. See the NatSpec
 at the top of `script/DeployBase.s.sol` for details.
 
-### Assumptions and External Risks
-
-The protocol makes the following assumptions about external dependencies:
-
-- **USDC is not globally paused by Circle.** A global pause halts all
-  deposits and withdrawals. Accepted external risk (occurred once, March
-  2023).
-- **Treasury multisig is not USDC-blacklisted.** If Circle blacklists the
-  treasury address, `FEE_COLLECTOR.collectFee(...)` reverts, blocking all
-  yield-bearing withdrawals. The emergency treasury-rotation mechanism
-  (7-day timelock + 14-day grace) recovers from this state. An additional
-  try/catch layer on the fee path is tracked as future work to preserve
-  INV-5 during the recovery window.
-- **Aave V3 has sufficient withdrawal liquidity.** The exit-redirect
-  mechanism shifts shortfall to Morpho if Aave is constrained.
-  Simultaneous depletion of both pools blocks withdrawals until liquidity
-  returns (reverts `InsufficientVaultLiquidity` cleanly).
-- **Morpho Steakhouse vault is solvent.** The oracle checks that the share
-  price has not fallen below 1 USDC. An unsafe Morpho vault is excluded
-  from routing.
-- **MetaMorpho shares use 18 decimals.** MetaMorpho applies
-  `DECIMALS_OFFSET = 18 - assetDecimals`. The oracle's `SHARE_UNIT = 1e18`
-  depends on this.
-
 ### Bug Bounty
 
 Details will be published ahead of mainnet deployment.
