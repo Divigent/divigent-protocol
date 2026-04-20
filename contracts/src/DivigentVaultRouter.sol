@@ -113,6 +113,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     bytes32 private constant INITIALIZE_FOR_TYPEHASH =
         keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
 
+    /// @dev Gas limit on Morpho view calls inside the capacity helper.
+    uint256 private constant MORPHO_VIEW_GAS = 100_000;
+
     // ── Immutables ────────────────────────────────────────────────────────────
 
     /// @notice USDC token on Base mainnet (6 decimals).
@@ -951,13 +954,6 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     // ── Internal: Withdraw-Capacity Planning ──────────────────────────────────
 
-    /// @dev Gas limit on Morpho view calls inside the capacity helper.
-    ///      Morpho's `convertToAssets` on Steakhouse USDC consumes ~5-15k
-    ///      under normal conditions. 100k gives 6-20x headroom while bounding
-    ///      the cost of a gas-bomb call (compromised vault, pathological
-    ///      allocator) to a predictable amount.
-    uint256 private constant _MORPHO_VIEW_GAS = 100_000;
-
     /// @dev Canonical source of truth for withdraw-capacity math. Called by
     ///      both `withdraw()` and `withdrawCapacity()` so the state-changing
     ///      path and the pre-flight view can never disagree by construction.
@@ -982,7 +978,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             // No exposure — vacuously reachable.
             cap.morphoReachable = true;
         } else {
-            try MORPHO_VAULT.convertToAssets{gas: _MORPHO_VIEW_GAS}(morphoShares)
+            try MORPHO_VAULT.convertToAssets{gas: MORPHO_VIEW_GAS}(morphoShares)
                 returns (uint256 assets)
             {
                 cap.morphoAssetsHeld = assets;
