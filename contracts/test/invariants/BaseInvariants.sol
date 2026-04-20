@@ -429,17 +429,17 @@ abstract contract BaseInvariants is Test {
                 }
             } catch (bytes memory reason) {
                 bytes4 sel = bytes4(reason);
-                bytes4 expected = bytes4(keccak256("InsufficientVaultLiquidity(uint256,uint256)"));
-                if (!shouldSucceed && sel != expected) {
+                bytes4 insufficient = bytes4(keccak256("InsufficientVaultLiquidity(uint256,uint256)"));
+                bytes4 panic        = bytes4(0x4e487b71); // Panic(uint256)
+
+                if (!shouldSucceed && sel != insufficient) {
                     vm.revertTo(snap);
                     fail("Router-O VIOLATED: capacity short but revert reason != InsufficientVaultLiquidity");
                 }
-                // If shouldSucceed but the call reverted, the revert could be
-                // legitimate (e.g. rounding edge cases in Morpho exact-asset
-                // withdraw). We do NOT fail here to avoid false positives from
-                // plan/execute drift — the Router-O property is specifically
-                // about capacity predicting outcomes, and execution may still
-                // reject for unrelated reasons.
+                if (shouldSucceed && sel != insufficient && sel != panic) {
+                    vm.revertTo(snap);
+                    fail("Router-O VIOLATED: capacity sufficient but unexpected revert selector");
+                }
             }
             vm.revertTo(snap);
             return; // One probe per step.
@@ -699,13 +699,7 @@ abstract contract BaseInvariants is Test {
             + _operatorHandler.operatorDepositCount()
             + _operatorHandler.operatorWithdrawCount()
             + _permitHandler.permitDepositCount();
-        // Tolerance scales per op. 1e3 wei per op captures compounded
-        // virtual-offset rounding across deposits/withdraws/yield/loss steps
-        // in the handler graph. Baseline 1e6 wei absorbs initial-state dust.
-        // Morpho's share math now uses `Math.mulDiv` in the mock (matching
-        // real MetaMorpho — single-floor), so the tolerance does not need
-        // to absorb mock-specific compounding.
-        uint256 tolerance = ops * 1e3 + 1e6;
+        uint256 tolerance = ops * 4 + 1e6;
 
         // Losses are an outflow (external value destruction in Aave/Morpho).
         uint256 totalOut = withdrawn + fees + losses;
