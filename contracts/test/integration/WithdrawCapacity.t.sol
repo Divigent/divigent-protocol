@@ -124,7 +124,7 @@ contract WithdrawCapacityTest is Actions {
         assertEq(cap.totalWithdrawCap, cap.aaveWithdrawCap, "total = Aave only");
     }
 
-    /// @notice Gas-bomb Morpho view: the try/catch ceiling (`_MORPHO_VIEW_GAS`)
+    /// @notice Gas-bomb Morpho view: the try/catch ceiling (`MORPHO_VIEW_GAS`)
     ///         absorbs the hit, capacity view still returns. Without the
     ///         gas limit, the caller would be out-of-gas'd by the malicious
     ///         vault view.

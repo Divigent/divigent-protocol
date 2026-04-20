@@ -81,7 +81,7 @@ contract MockMorphoVault {
         if (revertOnConvertToAssets) revert("MockMorphoVault: convertToAssets disabled");
         if (gasBombConvertToAssets) {
             // Burn gas until the try/catch ceiling is hit, forcing the caller's
-            // catch branch to execute. Used to test `_MORPHO_VIEW_GAS` bounds.
+            // catch branch to execute. Used to test `MORPHO_VIEW_GAS` bounds.
             while (true) {}
         }
         return _sharesToAssets(shares);
