@@ -7,6 +7,29 @@ import {IDivigentYieldOracle} from "./IDivigentYieldOracle.sol";
 /// @notice Interface for DivigentVaultRouter — the central orchestration contract
 ///         for the Divigent yield infrastructure protocol.
 interface IDivigentVaultRouter {
+    // ── Structs ──────────────────────────────────────────────────────────────
+
+    /// @notice Snapshot of the router's withdraw capacity at the current block.
+    ///         Returned by `withdrawCapacity()`. Mirrors the exact math the
+    ///         router's `withdraw()` uses internally to plan redemptions, so
+    ///         a pre-flight read from this struct is guaranteed to agree
+    ///         with what the state-changing call sees in the same block.
+    ///
+    ///         `morphoReachable` distinguishes "Morpho has zero capacity
+    ///         right now" (reachable=true, cap=0) from "Morpho's view path
+    ///         reverted" (reachable=false). SDKs should treat the latter
+    ///         as a hard block for any wallet that holds Morpho-derived
+    ///         shares — `withdraw()` will revert `MorphoUnreachable()`.
+    struct VaultCapacity {
+        uint256 aaveAssetsHeld;       // A_TOKEN.balanceOf(router) — router's Aave position
+        uint256 aaveIdleLiquidity;    // USDC.balanceOf(aToken) — pool's paying capacity
+        uint256 aaveWithdrawCap;      // min(held, idle) — what Aave can serve right now
+        uint256 morphoAssetsHeld;     // Morpho shares valued via convertToAssets (0 if !reachable)
+        uint256 morphoWithdrawCap;    // min(held, maxWithdraw) — what Morpho can serve right now
+        bool    morphoReachable;      // false if Morpho view path reverted or hit gas limit
+        uint256 totalWithdrawCap;     // aaveWithdrawCap + morphoWithdrawCap
+    }
+
     // ── Events ────────────────────────────────────────────────────────────────
 
     /// @notice Emitted on every USDC deposit.
@@ -39,11 +62,27 @@ interface IDivigentVaultRouter {
     /// @notice Emitted when deposit pause state changes.
     event DepositsPaused(bool paused);
 
+    /// @notice Emitted when a withdrawal's proportional split was rebalanced
+    ///         because one vault's effective capacity was below its target slice.
+    ///         `shortLeg` identifies which vault was short: true = Morpho short,
+    ///         false = Aave short. The amount that was rerouted = abs(target - actual)
+    ///         on the short leg.
+    /// @dev    No event is emitted when the plan executes as originally proportioned.
+    event ExitRedirected(
+        address indexed wallet,
+        uint256 targetAave,
+        uint256 targetMorpho,
+        uint256 actualAave,
+        uint256 actualMorpho,
+        bool    shortLeg
+    );
+
     // ── Errors ────────────────────────────────────────────────────────────────
 
     error NotAuthorised();
     error DepositsPausedError();
     error ZeroAmount();
+    error ZeroAddress();
     error TVLCapExceeded(uint256 requested, uint256 cap);
     error InsufficientShares(uint256 requested, uint256 available);
     error NotEmergencyMultisig();
@@ -53,16 +92,45 @@ interface IDivigentVaultRouter {
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();
 
+    /// @notice Constructor-side zero-address errors. One per dependency so the
+    ///         revert reason pinpoints the misconfigured argument.
+    error ZeroUsdc();
+    error ZeroAavePool();
+    error ZeroAToken();
+    error ZeroMorphoVault();
+    error ZeroOracle();
+    error ZeroFeeCollector();
+    error ZeroDvUsdc();
+    error ZeroEmergencyMultisig();
+
     /// @notice Reverts when neither vault can accommodate the requested deposit amount.
     ///         This may occur when Aave has insufficient available liquidity AND Morpho's
     ///         maxDeposit is below the requested amount. The depositor should retry with
     ///         a smaller amount or wait for liquidity conditions to improve.
     error NoSafeRoute(uint256 amount);
 
+    /// @notice Reverts on withdrawal when Aave's redeemable cash plus Morpho's
+    ///         effective `maxWithdraw` is less than the requested gross USDC —
+    ///         i.e. neither vault, alone or combined, can service the exit.
+    /// @param  requested  The USDC amount the user is attempting to withdraw.
+    /// @param  available  The combined effective capacity across both vaults
+    ///                    at the time of the call.
+    error InsufficientVaultLiquidity(uint256 requested, uint256 available);
+
     /// @notice Reverts when the oracle has not been updated within MAX_STALENESS (2 hours).
     ///         Call DivigentYieldOracle.recordObservation() to refresh the oracle,
     ///         then retry the deposit.
     error StaleOracle();
+
+    /// @notice Reverts when the router's Morpho position cannot be valued
+    ///         (MORPHO_VAULT.convertToAssets reverted or hit the try/catch
+    ///         gas limit) and the router has non-zero Morpho exposure.
+    ///         A cleaner version of the previous behaviour where the raw
+    ///         Morpho revert would bubble up. SDKs can pre-flight this via
+    ///         `withdrawCapacity()` — `morphoReachable == false` means the
+    ///         next withdraw for a Morpho-touching wallet will revert with
+    ///         this error.
+    error MorphoUnreachable();
 
     // ── Authorisation ─────────────────────────────────────────────────────────
 
@@ -76,7 +144,7 @@ interface IDivigentVaultRouter {
     ///         enabling gasless onboarding flows where the wallet signs off-chain.
     /// @param wallet   The agent wallet to authorise.
     /// @param deadline Unix timestamp after which the signature is invalid.
-    /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline).
+    /// @param sig      EIP-712 signature over InitializeFor(address wallet, uint256 deadline, uint256 nonce).
     function initializeFor(
         address wallet,
         uint256 deadline,
@@ -110,6 +178,13 @@ interface IDivigentVaultRouter {
 
     /// @notice EIP-2612 permit variant — no prior USDC.approve() required.
     ///         Combines permit + deposit in a single transaction.
+    /// @param amount   USDC amount to deposit (6 decimals).
+    /// @param wallet   Agent wallet that owns the USDC and receives dvUSDC.
+    /// @param deadline Unix timestamp after which the permit signature is invalid.
+    /// @param v        ECDSA signature component v.
+    /// @param r        ECDSA signature component r.
+    /// @param s        ECDSA signature component s.
+    /// @return dvUsdcMinted Number of dvUSDC tokens minted.
     function depositWithPermit(
         uint256 amount,
         address wallet,
@@ -164,7 +239,8 @@ interface IDivigentVaultRouter {
     // ── View: Preview & Simulation ─────────────────────────────────────────────
 
     /// @notice Preview how many dvUSDC shares would be minted for a given USDC deposit.
-    ///         Uses the current exchange rate (pre-deposit snapshot semantics).
+    ///         Uses the current live exchange rate. Note: the actual deposit uses a
+    ///         pre-transfer snapshot, so the minted amount may differ slightly.
     /// @param assets USDC amount to simulate depositing (6 decimals).
     /// @return dvUsdcOut Expected dvUSDC minted.
     function previewDeposit(uint256 assets) external view returns (uint256 dvUsdcOut);
@@ -200,6 +276,22 @@ interface IDivigentVaultRouter {
     function getCurrentAllocation()
         external view returns (uint256 aaveAssets, uint256 morphoAssets);
 
+    /// @notice Safe pre-flight view for withdraw planning. Returns the
+    ///         router's current exit capacity decomposed per vault.
+    ///
+    ///         Never reverts. If Morpho's view path is failing (vault
+    ///         upgrade, compromised allocator, gas-bomb), the call still
+    ///         returns with `morphoReachable = false` and Morpho fields
+    ///         zeroed. Callers can compare `totalWithdrawCap` against a
+    ///         desired gross and decide whether to submit the withdraw
+    ///         tx — avoiding wasted gas on a predictable revert.
+    ///
+    ///         Mirrors `withdraw()`'s internal planning math exactly. A
+    ///         successful read at block N is a strong (but not atomic)
+    ///         guarantee that a withdraw at the same block will clear
+    ///         for `gross <= totalWithdrawCap`.
+    function withdrawCapacity() external view returns (VaultCapacity memory);
+
     /// @notice Returns the oracle's recommended vault for a given deposit amount,
     ///         accounting for amount-aware capacity checks.
     ///         Reverts with NoSafeRoute if neither vault can accommodate `amount`.
@@ -223,4 +315,32 @@ interface IDivigentVaultRouter {
     /// @notice Resumes deposits after a pause.
     ///         Only callable by the immutable emergency multisig.
     function unpauseDeposits() external;
+
+    // ── Emergency Treasury Rotation (multisig only, timelocked) ───────────────
+
+    /// @dev Rotation lifecycle events (`TreasuryRotationProposed`,
+    ///      `TreasuryRotationCancelled`, `TreasuryUpdated`) are emitted by
+    ///      `DivigentFeeCollector` — where the state mutation happens.
+    ///      Indexers watching the treasury-rotation lifecycle must subscribe
+    ///      to the FeeCollector address.
+
+    /// @notice Propose rotating the fee treasury to `newTreasury`. Starts
+    ///         a 7-day timelock; the rotation must be finalised via
+    ///         `executeTreasuryRotation`. Users can watch the
+    ///         `TreasuryRotationProposed` event and exit before the delay
+    ///         elapses if they disagree with the new treasury.
+    ///
+    ///         Only callable by the immutable emergency multisig. Intended
+    ///         for recovery when the current treasury is blocklisted by
+    ///         USDC (Circle's `blacklist(...)` admin action) — the fee
+    ///         transfer would revert and withdrawals would DoS.
+    function proposeTreasuryRotation(address newTreasury) external;
+
+    /// @notice Finalise a previously-proposed rotation after the 7-day
+    ///         delay elapses. Only callable by the emergency multisig.
+    function executeTreasuryRotation() external;
+
+    /// @notice Cancel a pending rotation before it executes. Only callable
+    ///         by the emergency multisig.
+    function cancelTreasuryRotation() external;
 }

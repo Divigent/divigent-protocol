@@ -9,6 +9,8 @@
 ########################
 .idea/
 *.iml
+.claude/
+.audit/
 
 ########################
 # Foundry / Solidity build
@@ -24,8 +26,20 @@ lib/
 contracts/foundry.lock
 contracts/cache/
 contracts/out/
+contracts/coverage-html/
+contracts/crytic-export/
+contracts/broadcast/
+contracts/echidna-corpus/
+contracts/echidna.yaml
+contracts/medusa-corpus/
+contracts/medusa.json
+
+lcov.info
 # Vendored deps inside contracts/
 contracts/lib/
+# remappings
+contracts/remappings.txt
+contracts/slither-router.json
 
 ########################
 # Misc

@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAaveV3Pool}          from "./interfaces/IAaveV3Pool.sol";
 import {IMorphoVault}         from "./interfaces/IMorphoVault.sol";
@@ -170,7 +171,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param usdc              USDC address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 on Base).
-    /// @param aavePool          Aave V3 Pool (0x18cd499E3d7ed42fEBFCbf98a1d306f4ccc4d934 on Base).
+    /// @param aavePool          Aave V3 Pool (0xA238Dd80C259a72e81d7e4664a9801593F98d1c5 on Base).
     /// @param aToken            aUSDC address on Base.
     /// @param morphoVault       MetaMorpho USDC vault address on Base.
     /// @param oracle            DivigentYieldOracle address.
@@ -189,14 +190,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     )
         EIP712("DivigentVaultRouter", "1")
     {
-        require(usdc              != address(0), "Router: zero USDC");
-        require(aavePool          != address(0), "Router: zero aavePool");
-        require(aToken            != address(0), "Router: zero aToken");
-        require(morphoVault       != address(0), "Router: zero morpho");
-        require(oracle            != address(0), "Router: zero oracle");
-        require(feeCollector      != address(0), "Router: zero feeCollector");
-        require(dvUsdc            != address(0), "Router: zero dvUsdc");
-        require(emergencyMultisig != address(0), "Router: zero multisig");
+        if (usdc              == address(0)) revert ZeroUsdc();
+        if (aavePool          == address(0)) revert ZeroAavePool();
+        if (aToken            == address(0)) revert ZeroAToken();
+        if (morphoVault       == address(0)) revert ZeroMorphoVault();
+        if (oracle            == address(0)) revert ZeroOracle();
+        if (feeCollector      == address(0)) revert ZeroFeeCollector();
+        if (dvUsdc            == address(0)) revert ZeroDvUsdc();
+        if (emergencyMultisig == address(0)) revert ZeroEmergencyMultisig();
 
         USDC               = IERC20(usdc);
         AAVE_POOL          = IAaveV3Pool(aavePool);
@@ -287,6 +288,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     function setOperator(address operator, bool approved) external override {
+        if (operator == address(0)) revert ZeroAddress();
         isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
     }
@@ -377,53 +379,114 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         DV_USDC.burn(wallet, shares);
 
         // ── Step 3: Redeem from vaults (exact-asset semantics) ────────────────
-        // Determine how much USDC to pull from each vault proportionally.
-        uint256 aaveBalance   = A_TOKEN.balanceOf(address(this));
-        uint256 morphoBalance = _morphoAssetsHeld();
+        // Snapshot USDC balance BEFORE vault redemptions. Any stray USDC already
+        // in the router (accidental transfer, rounding dust) is excluded from
+        // the yield calculation by measuring the delta, not the absolute balance.
+        uint256 balanceBefore = USDC.balanceOf(address(this));
+
+        // Single source of truth for capacity math — shared with the public
+        // `withdrawCapacity()` pre-flight view, so the pre-flight can never
+        // disagree with execution in the same block.
+        VaultCapacity memory cap = _planWithdrawCapacity();
+
+        // Strict check on the state-changing path: if Morpho's view path
+        // failed AND the router actually has Morpho exposure, we cannot
+        // value the position and must revert. SDKs can detect this ahead
+        // of time via `withdrawCapacity().morphoReachable == false`.
+        if (!cap.morphoReachable) revert MorphoUnreachable();
+
+        uint256 aaveBalance   = cap.aaveAssetsHeld;
+        uint256 morphoBalance = cap.morphoAssetsHeld;
         uint256 totalHeld     = aaveBalance + morphoBalance;
 
         if (totalHeld == 0) revert ZeroAmount(); // should never happen post-invariant-check
 
         // grossUSDC is the estimated withdrawal target (used for proportional split).
         // The actual received amount (actualGross) is measured after redemptions.
-        uint256 totalAssets_  = aaveBalance + morphoBalance; // == totalHeld
         uint256 totalSupply_  = DV_USDC.totalSupply() + shares; // restore pre-burn supply
-        uint256 grossUSDC     = _sharesToAssets(shares, totalAssets_, totalSupply_);
+        uint256 grossUSDC     = _sharesToAssets(shares, totalHeld, totalSupply_);
 
-        uint256 fromAave   = 0;
-        uint256 fromMorpho = 0;
-
+        // ── Plan: proportional target ─────────────────────────────────────────
+        // The initial target is proportional to each vault's share of totalHeld.
+        // If one leg is constrained, the shortfall redirects to the other.
+        uint256 targetAave;
+        uint256 targetMorpho;
         if (aaveBalance > 0 && morphoBalance == 0) {
-            fromAave = grossUSDC;
+            targetAave   = grossUSDC;
+            targetMorpho = 0;
         } else if (morphoBalance > 0 && aaveBalance == 0) {
-            fromMorpho = grossUSDC;
+            targetAave   = 0;
+            targetMorpho = grossUSDC;
         } else {
-            // Split proportionally between vaults
-            fromAave   = (grossUSDC * aaveBalance)   / totalHeld;
-            fromMorpho = grossUSDC - fromAave;         // remainder to Morpho
+            targetAave   = (grossUSDC * aaveBalance) / totalHeld;
+            targetMorpho = grossUSDC - targetAave;
         }
 
-        // Redeem from Aave (exact USDC amount)
+        // Capacity locals pulled from the plan struct for the redirect math.
+        uint256 aaveCap   = cap.aaveWithdrawCap;
+        uint256 morphoCap = cap.morphoWithdrawCap;
+
+        // Early revert when no combination of the two can serve the ask.
+        if (aaveCap + morphoCap < grossUSDC) {
+            revert InsufficientVaultLiquidity(grossUSDC, aaveCap + morphoCap);
+        }
+
+        // ── Redirect: if one leg is short, shift its slack to the other ──────
+        // After the early-revert above, at most ONE leg can be short. Proof:
+        // if both were short, targetAave + targetMorpho > aaveCap + morphoCap,
+        // but targetAave + targetMorpho == grossUSDC, so
+        // grossUSDC > aaveCap + morphoCap — the early-revert case. Therefore a
+        // single redirect suffices; no loop is required.
+        uint256 fromAave;
+        uint256 fromMorpho;
+        bool    redirected;
+        bool    shortLegMorpho;
+        if (targetAave > aaveCap) {
+            fromAave        = aaveCap;
+            fromMorpho      = grossUSDC - aaveCap;
+            redirected      = true;
+            shortLegMorpho  = false;
+        } else if (targetMorpho > morphoCap) {
+            fromMorpho      = morphoCap;
+            fromAave        = grossUSDC - morphoCap;
+            redirected      = true;
+            shortLegMorpho  = true;
+        } else {
+            fromAave   = targetAave;
+            fromMorpho = targetMorpho;
+        }
+
+        // ── Execute: pull from each vault ────────────────────────────────────
+        // We intentionally DO NOT wrap the mutating Morpho call in try/catch.
+        // If Morpho's view said it could serve `fromMorpho` but the mutating
+        // call reverts (intra-block state change, liquidity race, or a hostile
+        // vault implementation reentering), the revert propagates.
+        // The reentrancy guard relies on this bubble-up, and plan/execute
+        // capacity drift is rare enough that a simple retry is acceptable.
         if (fromAave > 0) {
-            // Withdraw exactly fromAave USDC from Aave; USDC arrives in this contract
             AAVE_POOL.withdraw(address(USDC), fromAave, address(this));
         }
-
-        // Redeem from Morpho (exact-asset semantics via ERC-4626 withdraw)
-        // Using withdraw(assets, receiver, owner) instead of convertToShares + redeem:
-        //   - Eliminates share-rounding risk: convertToShares rounds down, causing the
-        //     redeemed USDC to be slightly less than requested (dust left in vault).
-        //   - ERC-4626 withdraw() burns however many shares are needed to deliver
-        //     exactly `fromMorpho` USDC to the receiver, or reverts if insufficient.
         if (fromMorpho > 0) {
+            // ERC-4626 `withdraw(assets, receiver, owner)`: exact-asset semantics.
+            // Using withdraw() over redeem() avoids share-rounding leaving dust.
             MORPHO_VAULT.withdraw(fromMorpho, address(this), address(this));
         }
 
+        if (redirected) {
+            emit ExitRedirected(wallet, targetAave, targetMorpho, fromAave, fromMorpho, shortLegMorpho);
+        }
+
         // ── Step 4: Compute fee from actual received USDC ─────────────────────
-        // [INV-4] At this point: USDC.balanceOf(this) == actualGross (from vault redemptions)
-        // Measure what actually arrived — Morpho may deliver slightly more or less than
-        // requested due to interest accrual between the split calculation and redemption.
-        uint256 actualGross  = USDC.balanceOf(address(this));
+        // Measure the DELTA: what the vaults delivered in THIS transaction.
+        // Using the delta (not absolute balance) ensures stray USDC that was
+        // already in the router is excluded from yield and fee calculation.
+        uint256 actualGross  = USDC.balanceOf(address(this)) - balanceBefore;
+
+        // Guard: if vault redemptions silently returned 0 (protocol bug, not a
+        // revert), stop here rather than burning dvUSDC for nothing. See
+        // test/SilentFailure.t.sol for the proof that this is exploitable without
+        // this check.
+        if (actualGross == 0) revert InsufficientVaultLiquidity(grossUSDC, 0);
 
         // Recompute yield from actual gross; floor at 0 — principal is never negative yield
         uint256 actualYield  = actualGross > principalOut ? actualGross - principalOut : 0;
@@ -442,7 +505,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         }
 
         // Transfer net USDC to wallet
-        // [INV-4] After this: USDC.balanceOf(this) == 0
+        // [INV-4] After this: USDC.balanceOf(this) == balanceBefore (stray USDC preserved)
         USDC.safeTransfer(wallet, usdcReturned);
 
         emit Withdrawn(wallet, shares, usdcReturned, actualYield, feeAmount);
@@ -528,45 +591,72 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     }
 
     /// @inheritdoc IDivigentVaultRouter
-    /// @dev Algebraic derivation (assuming gross > principalOut, i.e. there is yield):
-    ///        net = gross * (1 - feeBps/bpsDenominator) + principalOut * (feeBps/bpsDenominator)
-    ///        where gross = s * (A+1) / (S+1), principalOut = costBasis * s / walletShares
-    ///      Solving for s:
-    ///        s = desiredNet * bpsDenominator * walletShares * (S+1)
-    ///            / [ (bpsDenominator - feeBps) * walletShares * (A+1)
-    ///                + feeBps * costBasis * (S+1) ]
-    ///      Rounds up to ensure the user receives at least desiredNetUSDC.
-    ///      If the position has no yield (principalOut >= gross), this formula slightly
-    ///      overestimates required shares — a conservative outcome that is acceptable
-    ///      for a preview function. The caller should verify with previewRedeem().
+    /// @dev Two-branch solver, selected by wallet loss state:
+    ///
+    ///      A wallet is "uniformly underwater" when walletShares * A1 <= costBasis * S1.
+    ///      In that regime every proportional slice satisfies gross_s <= principalOut_s,
+    ///      so withdraw() floors yield at 0 and charges no fee. Using the fee-adjusted
+    ///      formula there would treat negative yield as a fee rebate and under-solve
+    ///      for shares, breaking the ">= desiredNetUSDC" guarantee.
+    ///
+    ///      (1) Loss branch (grossAll <= costBasis):
+    ///            net = gross = s * (A+1) / (S+1)
+    ///            s   = ceil(desiredNet * (S+1) / (A+1))
+    ///
+    ///      (2) Profit branch (grossAll > costBasis):
+    ///            net = gross * (1 - feeBps/bpsDen) + principalOut * (feeBps/bpsDen)
+    ///            s   = desiredNet * bpsDen * walletShares * (S+1)
+    ///                / [ (bpsDen - feeBps) * walletShares * (A+1)
+    ///                  + feeBps * costBasis * (S+1) ]
+    ///
+    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC, and
+    ///      cap at walletShares (position value is a hard ceiling on what can be
+    ///      withdrawn regardless of desiredNet).
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external
         view
         override
         returns (uint256 dvUsdcShares)
     {
+        if (desiredNetUSDC == 0) return 0;
+
         uint256 walletShares = DV_USDC.balanceOf(wallet);
         if (walletShares == 0) return 0;
 
-        uint256 A1         = totalVaultAssets() + VIRTUAL_OFFSET;
-        uint256 S1         = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
-        uint256 costBasis  = costBasisUSDC[wallet];
-        uint256 feeBps     = FEE_COLLECTOR.FEE_BPS();
-        uint256 bpsDenom   = FEE_COLLECTOR.BPS_DENOMINATOR();
+        uint256 A1        = totalVaultAssets() + VIRTUAL_OFFSET;
+        uint256 S1        = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
+        uint256 costBasis = costBasisUSDC[wallet];
 
-        // numerator   = desiredNet * bpsDenominator * walletShares * S1
-        // denominator = (bpsDenom - feeBps) * walletShares * A1
-        //             + feeBps * costBasis * S1
-        uint256 numerator   = desiredNetUSDC * bpsDenom * walletShares * S1;
+        // Loss branch: wallet's total gross <= its costBasis ⇒ no fee on any slice.
+        uint256 grossAll = Math.mulDiv(walletShares, A1, S1, Math.Rounding.Floor);
+        if (grossAll <= costBasis) {
+            // Degenerate dust case: entire wallet values to 0 USDC (floor).
+            // Any share count — including walletShares — would redeem to 0 gross
+            // and silently under-deliver. Signal "unserviceable" via 0.
+            if (grossAll == 0) return 0;
+
+            dvUsdcShares = Math.mulDiv(desiredNetUSDC, S1, A1, Math.Rounding.Ceil);
+            if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
+            return dvUsdcShares;
+        }
+
+        // Profit branch: fee applies to (gross - principalOut).
+        uint256 feeBps   = FEE_COLLECTOR.FEE_BPS();
+        uint256 bpsDenom = FEE_COLLECTOR.BPS_DENOMINATOR();
+
         uint256 denominator = (bpsDenom - feeBps) * walletShares * A1
                             + feeBps * costBasis * S1;
-
         if (denominator == 0) return 0;
 
-        // Round up to ensure usdcReturned >= desiredNetUSDC
-        dvUsdcShares = (numerator + denominator - 1) / denominator;
+        // Uses OZ Math.mulDiv for 512-bit intermediate precision on the
+        // caller-controlled 4-way numerator. Ceil ensures usdcReturned >= desiredNetUSDC.
+        dvUsdcShares = Math.mulDiv(
+            desiredNetUSDC * bpsDenom,
+            walletShares * S1,
+            denominator,
+            Math.Rounding.Ceil
+        );
 
-        // Cap at wallet's actual holdings
         if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
     }
 
@@ -581,14 +671,23 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     }
 
     /// @inheritdoc IDivigentVaultRouter
+    /// @dev Degrades gracefully when Morpho's view path is unreachable
+    ///      (revert or gas bomb). Routes through `_planWithdrawCapacity()`
+    ///      so the same 100k-gas try/catch that guards `withdraw()` also
+    ///      guards this informational view — external integrators can call
+    ///      this without risk of OOG'ing on a compromised Morpho vault.
+    ///      Callers that need to distinguish "0 Morpho holdings" from
+    ///      "Morpho unreachable" should read `withdrawCapacity()` which
+    ///      exposes the `morphoReachable` flag.
     function getCurrentAllocation()
         external
         view
         override
         returns (uint256 aaveAssets, uint256 morphoAssets)
     {
-        aaveAssets   = A_TOKEN.balanceOf(address(this));
-        morphoAssets = _morphoAssetsHeld();
+        VaultCapacity memory cap = _planWithdrawCapacity();
+        aaveAssets   = cap.aaveAssetsHeld;
+        morphoAssets = cap.morphoAssetsHeld;
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -635,6 +734,31 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     function unpauseDeposits() external override onlyEmergencyMultisig {
         depositsPaused = false;
         emit DepositsPaused(false);
+    }
+
+    // ── Emergency Treasury Rotation ──────────────────────────────────────────
+
+    /// @inheritdoc IDivigentVaultRouter
+    /// @dev Forwards to the FeeCollector. Router enforces authorization
+    ///      (`onlyEmergencyMultisig`); FeeCollector enforces the timelock,
+    ///      holds the state, and emits the lifecycle events from where the
+    ///      state changes.
+    function proposeTreasuryRotation(address newTreasury)
+        external
+        override
+        onlyEmergencyMultisig
+    {
+        FEE_COLLECTOR.proposeTreasuryRotation(newTreasury);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function executeTreasuryRotation() external override onlyEmergencyMultisig {
+        FEE_COLLECTOR.executeTreasuryRotation();
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function cancelTreasuryRotation() external override onlyEmergencyMultisig {
+        FEE_COLLECTOR.cancelTreasuryRotation();
     }
 
     // ── Internal: Share Maths ─────────────────────────────────────────────────
@@ -704,7 +828,15 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
             return USDC.balanceOf(address(A_TOKEN)) >= amount;
         } else {
-            return MORPHO_VAULT.maxDeposit(address(this)) >= amount;
+            // ROUTING-SAFE: a Morpho view revert (pause, unexpected state) is
+            // treated as "Morpho unavailable, don't route here" rather than
+            // cascading into a deposit-wide revert. Deposits then fall through
+            // to the Aave branch by the caller's retry logic.
+            try MORPHO_VAULT.maxDeposit(address(this)) returns (uint256 cap) {
+                return cap >= amount;
+            } catch {
+                return false;
+            }
         }
     }
 
@@ -796,13 +928,85 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         emit Deposited(wallet, amount, dvUsdcMinted, vaultType);
     }
 
-    // ── Internal: Morpho Balance ──────────────────────────────────────────────
+    // ── Internal: Morpho Reads ────────────────────────────────────────────────
 
-    /// @dev Returns the USDC value of Morpho shares held by this contract.
-    ///      Uses the vault's convertToAssets() which accounts for accrued yield.
+    /// @dev Returns the USDC value of Morpho shares held by
+    ///      this contract. Fails loud on any Morpho read failure — intentional.
     function _morphoAssetsHeld() internal view returns (uint256) {
         uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
         if (morphoShares == 0) return 0;
         return MORPHO_VAULT.convertToAssets(morphoShares);
+    }
+
+    /// @dev Returns Morpho's effective `maxWithdraw` for this
+    ///      contract, or 0 if the view reverts. Used only for withdraw capacity
+    ///      planning and oracle-side routing decisions. NEVER use in valuation.
+    function _safeMorphoMaxWithdraw() internal view returns (uint256) {
+        try MORPHO_VAULT.maxWithdraw(address(this)) returns (uint256 m) {
+            return m;
+        } catch {
+            return 0;
+        }
+    }
+
+    // ── Internal: Withdraw-Capacity Planning ──────────────────────────────────
+
+    /// @dev Gas limit on Morpho view calls inside the capacity helper.
+    ///      Morpho's `convertToAssets` on Steakhouse USDC consumes ~5-15k
+    ///      under normal conditions. 100k gives 6-20x headroom while bounding
+    ///      the cost of a gas-bomb call (compromised vault, pathological
+    ///      allocator) to a predictable amount.
+    uint256 private constant _MORPHO_VIEW_GAS = 100_000;
+
+    /// @dev Canonical source of truth for withdraw-capacity math. Called by
+    ///      both `withdraw()` and `withdrawCapacity()` so the state-changing
+    ///      path and the pre-flight view can never disagree by construction.
+    ///
+    ///      Never reverts. If Morpho's `convertToAssets` fails or hits the
+    ///      gas limit, `morphoReachable` is set to false and Morpho-derived
+    ///      fields are zero. Callers that need to fail-strict (i.e.
+    ///      `withdraw()`) check the flag and revert `MorphoUnreachable`.
+    function _planWithdrawCapacity()
+        internal
+        view
+        returns (VaultCapacity memory cap)
+    {
+        cap.aaveAssetsHeld    = A_TOKEN.balanceOf(address(this));
+        cap.aaveIdleLiquidity = USDC.balanceOf(address(A_TOKEN));
+        cap.aaveWithdrawCap   = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
+            ? cap.aaveAssetsHeld
+            : cap.aaveIdleLiquidity;
+
+        uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
+        if (morphoShares == 0) {
+            // No exposure — vacuously reachable.
+            cap.morphoReachable = true;
+        } else {
+            try MORPHO_VAULT.convertToAssets{gas: _MORPHO_VIEW_GAS}(morphoShares)
+                returns (uint256 assets)
+            {
+                cap.morphoAssetsHeld = assets;
+                cap.morphoReachable  = true;
+            } catch {
+                // morphoAssetsHeld stays 0, morphoReachable stays false.
+            }
+        }
+
+        uint256 morphoMax = _safeMorphoMaxWithdraw();
+        cap.morphoWithdrawCap = cap.morphoAssetsHeld < morphoMax
+            ? cap.morphoAssetsHeld
+            : morphoMax;
+
+        cap.totalWithdrawCap = cap.aaveWithdrawCap + cap.morphoWithdrawCap;
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function withdrawCapacity()
+        external
+        view
+        override
+        returns (VaultCapacity memory)
+    {
+        return _planWithdrawCapacity();
     }
 }

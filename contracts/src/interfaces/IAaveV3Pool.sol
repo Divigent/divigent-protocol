@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 /// @title IAaveV3Pool
 /// @notice Minimal interface for the Aave V3 Pool on Base mainnet.
 /// @dev    Full interface: https://github.com/aave/aave-v3-core/blob/master/contracts/interfaces/IPool.sol
-///         Base mainnet Pool address: 0x18cd499E3d7ed42fEBFCbf98a1d306f4ccc4d934
+///         Base mainnet Pool address: 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5
 interface IAaveV3Pool {
     // ── Supply ────────────────────────────────────────────────────────────────
 

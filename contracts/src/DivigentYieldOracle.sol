@@ -29,7 +29,7 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///         Morpho rate methodology (share-price snapshot):
 ///         - Rate is derived from two consecutive share-price observations separated by
 ///           at least MIN_OBSERVATION_INTERVAL seconds. Using a single snapshot and
-///           comparing to a fixed base of 1e6 would confuse total accrued yield with
+///           comparing to a fixed base would confuse total accrued yield with
 ///           the period rate, producing wildly inaccurate annualised figures.
 ///         - `_lastMorphoSharePrice` is stored in state and updated on each observation.
 ///         - intervalRate = (currentPrice - lastPrice) / lastPrice * (SECONDS_PER_YEAR / elapsed)
@@ -37,7 +37,7 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///
 ///         Vault safety (oracle advisory):
 ///         - Aave: utilisation check via available USDC vs. total aToken supply (<90%).
-///         - Morpho: share price peg check (convertToAssets(1e6) >= 1e6 — no underwater).
+///         - Morpho: share price peg check (convertToAssets(1e18) >= 1e6 — no underwater).
 ///         - The oracle provides an advisory signal. VaultRouter enforces amount-aware
 ///           capacity checks via _canAllocate() before routing any deposit.
 ///
@@ -84,9 +84,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     uint256 public constant MIN_DIFFERENTIAL_RAY = 5e24; // 0.5% in ray
 
     /// @notice Unit share quantity used for Morpho share-price queries.
-    ///         MetaMorpho vaults use 6-decimal shares matching USDC.
-    ///         convertToAssets(SHARE_UNIT) returns the current price of 1 full share.
-    uint256 public constant SHARE_UNIT = 1e6;
+    ///         MetaMorpho vaults use 18-decimal shares (standard ERC-4626).
+    ///         convertToAssets(SHARE_UNIT) returns the USDC value of 1 full share.
+    uint256 public constant SHARE_UNIT = 1e18;
 
     /// @notice Maximum age of the last observation before the oracle is considered stale.
     ///         VaultRouter rejects deposits when isFresh() returns false.
@@ -111,10 +111,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @dev A single checkpoint stores cumulative rate accumulators at a timestamp,
     ///      plus the Morpho share price recorded at that moment for auditability.
     ///      Cumulatives are truncated to uint224 — overflow is intentional and safe
-    ///      because we only use the *difference* between two checkpoints (like Uniswap V2).
+    ///      because only the *difference* between two checkpoints is used (like Uniswap V2).
     struct Checkpoint {
         uint32  timestamp;
-        uint64  morphoSharePrice;  // convertToAssets(SHARE_UNIT) at this checkpoint, 6 dec
+        uint64  morphoSharePrice;  // convertToAssets(1e18) = USDC value of 1 share, 6 dec
         uint224 aaveCumulative;    // Σ aaveRate × Δt (in RAY·seconds), truncated
         uint224 morphoCumulative;  // Σ morphoRate × Δt (in RAY·seconds), truncated
     }
@@ -143,6 +143,15 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///         Initialised in the constructor with the vault's current share price.
     uint256 public lastMorphoSharePrice;
 
+    // ── Errors ────────────────────────────────────────────────────────────────
+
+    /// @dev Constructor-side zero-address errors. One per dependency so the
+    ///      revert reason pinpoints the misconfigured argument.
+    error ZeroAavePool();
+    error ZeroAToken();
+    error ZeroUsdc();
+    error ZeroMorphoVault();
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param aavePool    Aave V3 Pool address on Base.
@@ -155,10 +164,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         address usdc,
         address morphoVault
     ) {
-        require(aavePool    != address(0), "Oracle: zero aavePool");
-        require(aToken      != address(0), "Oracle: zero aToken");
-        require(usdc        != address(0), "Oracle: zero usdc");
-        require(morphoVault != address(0), "Oracle: zero morphoVault");
+        if (aavePool    == address(0)) revert ZeroAavePool();
+        if (aToken      == address(0)) revert ZeroAToken();
+        if (usdc        == address(0)) revert ZeroUsdc();
+        if (morphoVault == address(0)) revert ZeroMorphoVault();
 
         AAVE_POOL    = IAaveV3Pool(aavePool);
         A_TOKEN      = IERC20(aToken);
@@ -187,7 +196,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     {
         (uint256 aaveTWAR, uint256 morphoTWAR) = _computeTWAR();
 
-        bool aaveSafe   = _isVaultSafe(VaultType.AAVE);
         bool morphoSafe = _isVaultSafe(VaultType.MORPHO);
 
         // Morpho wins only if: safe AND its TWAR exceeds Aave's by MIN_DIFFERENTIAL_RAY
@@ -264,7 +272,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         if (elapsed < MIN_OBSERVATION_INTERVAL) return;
 
         // ── Step 1: Accumulate using the PREVIOUS observation's spot rates ────
-        // This mirrors the Uniswap V2 accumulator pattern: we record the area
+        // Uniswap V2 accumulator pattern: record the area
         // under the rate curve for the interval [lastObservation, now].
         aaveCumulative   += aaveSpotRate   * elapsed;
         morphoCumulative += morphoSpotRate * elapsed;
@@ -275,7 +283,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // ── Step 3: Compute new Morpho rate from share-price snapshots ────────
         // Uses two consecutive share-price readings to derive the true interval APY.
         // intervalRate = (currentPrice - lastPrice) / lastPrice * (SECONDS_PER_YEAR / elapsed)
-        // This avoids the "compare to 1e6 base" flaw which conflates total accrued yield
+        // This avoids the "compare to a fixed base" flaw which conflates total accrued yield
         // with the current period rate, producing wildly inaccurate annualised figures.
         uint256 currentSharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
         uint256 newMorphoRate     = 0;
@@ -304,7 +312,11 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             morphoCumulative: uint224(morphoCumulative)   // intentional truncation
         });
 
-        unchecked { _head++; } // wraps naturally on uint8 overflow → mod BUFFER_SIZE
+        // Advance head with explicit modulo against BUFFER_SIZE.
+        // Do NOT rely on uint8 overflow: uint8 wraps at 256, and 256 % BUFFER_SIZE
+        // (48) = 16, which would silently desync the ring index from _head and
+        // break the chronological-order assumption inside _computeTWAR's walk.
+        _head = uint8((uint256(_head) + 1) % BUFFER_SIZE);
         if (_count < BUFFER_SIZE) _count++;
 
         // ── Step 5: Update state variables ────────────────────────────────────
@@ -389,14 +401,14 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             if (cp.timestamp <= windowStart) {
                 bestCheckpoint = cp;
                 found = true;
-                // continue — we want the NEWEST checkpoint that is still <= windowStart
+                // continue: find the NEWEST checkpoint that is still <= windowStart
             } else if (!found) {
                 // All checkpoints are newer than windowStart — use oldest available
                 bestCheckpoint = cp;
                 found = true;
                 break;
             } else {
-                // cp.timestamp > windowStart and we already have a valid bestCheckpoint
+                // cp.timestamp > windowStart and a valid bestCheckpoint exists
                 break;
             }
         }
@@ -410,12 +422,15 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
             return (aaveSpotRate, morphoSpotRate);
         }
 
-        // Compute TWAR from cumulative delta, handling uint224 truncation correctly.
-        // Since we truncate to uint224 on storage, the true delta is:
-        //   trueDelta = uint224(cumNow) - uint224(cumThen)  (wraps correctly in uint224)
-        // We cast both to uint256 after the uint224 subtraction to preserve wrap semantics.
-        uint256 aaveDelta   = uint224(uint224(aaveCumNow)   - bestCheckpoint.aaveCumulative);
-        uint256 morphoDelta = uint224(uint224(morphoCumNow) - bestCheckpoint.morphoCumulative);
+        // Compute TWAR from cumulative delta. Cumulatives are stored as uint224
+        // and intentionally overflow (Uniswap V2 pattern). The subtraction must
+        // be unchecked so Solidity 0.8.x wraps instead of reverting on underflow.
+        uint256 aaveDelta;
+        uint256 morphoDelta;
+        unchecked {
+            aaveDelta   = uint256(uint224(aaveCumNow)   - bestCheckpoint.aaveCumulative);
+            morphoDelta = uint256(uint224(morphoCumNow) - bestCheckpoint.morphoCumulative);
+        }
 
         aaveTWAR   = aaveDelta   / dt;
         morphoTWAR = morphoDelta / dt;
@@ -441,7 +456,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///        risk parameters. Safe if computed utilisation < 90% at query time.
     ///
     ///      Morpho share-price peg (heuristic):
-    ///        Safe if convertToAssets(SHARE_UNIT) >= SHARE_UNIT — i.e., the vault has
+    ///        Safe if convertToAssets(1 share) >= 1 USDC — i.e., the vault has
     ///        not gone underwater. This is a narrow bad-debt/peg check, not a liquidity
     ///        or market-stress check. A healthy share price does not guarantee the vault
     ///        can service a large redemption without delay or slippage.
@@ -461,11 +476,11 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
             return available >= minAvailable;
         } else {
-            // Morpho MetaMorpho vault
-            // Share price peg check: if convertToAssets(1 share) < 1 USDC, the vault
-            // is underwater. Healthy vaults always have sharePrice >= SHARE_UNIT.
+            // Morpho MetaMorpho vault (18-decimal shares, 6-decimal USDC)
+            // Share price peg check: 1 full share (1e18) should be worth at least
+            // 1 USDC (1e6). If not, the vault has gone underwater (bad debt).
             uint256 sharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
-            return sharePrice >= SHARE_UNIT;
+            return sharePrice >= 1e6;
         }
     }
 }

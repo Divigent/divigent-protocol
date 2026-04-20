@@ -3,243 +3,46 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 
-import {DivigentVaultRouter}  from "../src/DivigentVaultRouter.sol";
+import {DivigentVaultRouter} from "../src/DivigentVaultRouter.sol";
 import {DivigentFeeCollector} from "../src/DivigentFeeCollector.sol";
-import {DvUSDC}               from "../src/dvUSDC.sol";
+import {DvUSDC} from "../src/dvUSDC.sol";
 import {IDivigentVaultRouter} from "../src/interfaces/IDivigentVaultRouter.sol";
 import {IDivigentYieldOracle} from "../src/interfaces/IDivigentYieldOracle.sol";
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Mocks
-// ─────────────────────────────────────────────────────────────────────────────
+import {MockAavePool} from "./mocks/MockAavePool.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
+import {MockMorphoVault} from "./mocks/MockMorphoVault.sol";
+import {MockOracle} from "./mocks/MockOracle.sol";
 
-/// @dev Minimal ERC-20 for USDC and aToken mocking.
-contract MockERC20 {
-    string  public name;
-    string  public symbol;
-    uint8   public decimals;
-    uint256 public totalSupply;
-
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    constructor(string memory _name, string memory _symbol, uint8 _dec) {
-        name     = _name;
-        symbol   = _symbol;
-        decimals = _dec;
-    }
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-        totalSupply    += amount;
-    }
-
-    function burn(address from, uint256 amount) external {
-        balanceOf[from] -= amount;
-        totalSupply     -= amount;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to]         += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from]             -= amount;
-        balanceOf[to]               += amount;
-        return true;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    /// @dev Test helper: set an account's balance directly (adjusts totalSupply).
-    function setBalance(address account, uint256 newBalance) external {
-        uint256 old = balanceOf[account];
-        if (newBalance >= old) {
-            totalSupply += newBalance - old;
-        } else {
-            totalSupply -= old - newBalance;
-        }
-        balanceOf[account] = newBalance;
-    }
-}
-
-/// @dev Mock Aave V3 Pool: supply moves USDC into aToken, withdraw reverses.
-contract MockAavePool {
-    MockERC20 public usdc;
-    MockERC20 public aToken;
-
-    constructor(address _usdc, address _aToken) {
-        usdc   = MockERC20(_usdc);
-        aToken = MockERC20(_aToken);
-    }
-
-    /// @dev Simulates supply: pull USDC from caller, mint aToken 1:1.
-    function supply(address /*asset*/, uint256 amount, address onBehalfOf, uint16 /*refCode*/) external {
-        usdc.burn(msg.sender, amount);
-        aToken.mint(onBehalfOf, amount);
-    }
-
-    /// @dev Simulates withdraw: burn aToken from caller, push USDC.
-    function withdraw(address /*asset*/, uint256 amount, address to) external returns (uint256) {
-        aToken.burn(msg.sender, amount);
-        usdc.mint(to, amount);
-        return amount;
-    }
-}
-
-/// @dev Mock MetaMorpho vault (ERC-4626 style). Yield is simulated by
-///      incrementing an internal assets counter without minting shares.
-contract MockMorphoVault {
-    MockERC20 public usdc;
-    uint256   public totalShares;
-    uint256   public totalAssets_; // can drift above totalShares to simulate yield
-
-    uint256 private constant SHARE_UNIT = 1e6;
-    uint256 public maxDepositAmount = type(uint256).max;
-
-    constructor(address _usdc) {
-        usdc = MockERC20(_usdc);
-        // Seed 1:1 share price
-        totalAssets_ = 0;
-        totalShares  = 0;
-    }
-
-    // ── ERC-4626 surface ────────────────────────────────────────────────────
-
-    function convertToAssets(uint256 shares) external view returns (uint256) {
-        if (totalShares == 0) return shares; // 1:1 before first deposit
-        return shares * totalAssets_ / totalShares;
-    }
-
-    function convertToShares(uint256 assets) external view returns (uint256) {
-        if (totalAssets_ == 0) return assets;
-        return assets * totalShares / totalAssets_;
-    }
-
-    function maxDeposit(address /*owner*/) external view returns (uint256) {
-        return maxDepositAmount;
-    }
-
-    function maxWithdraw(address /*owner*/) external view returns (uint256) {
-        return type(uint256).max;
-    }
-
-    /// @dev deposit: pull USDC, mint proportional shares.
-    function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
-        shares = (totalShares == 0) ? assets : assets * totalShares / totalAssets_;
-        usdc.burn(msg.sender, assets);
-        totalAssets_ += assets;
-        totalShares  += shares;
-        _balances[receiver] += shares;
-    }
-
-    /// @dev withdraw (exact-asset): burn shares, push USDC.
-    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares) {
-        shares = (totalShares == 0) ? assets : (assets * totalShares + totalAssets_ - 1) / totalAssets_;
-        _balances[owner]  -= shares;
-        totalShares       -= shares;
-        totalAssets_      -= assets;
-        usdc.mint(receiver, assets);
-    }
-
-    function balanceOf(address account) external view returns (uint256) {
-        return _balances[account];
-    }
-
-    mapping(address => uint256) private _balances;
-
-    // ── Test helpers ────────────────────────────────────────────────────────
-
-    /// @dev Simulate yield accrual: increase assets without minting shares.
-    function accrueYield(uint256 extraAssets) external {
-        totalAssets_ += extraAssets;
-    }
-
-    /// @dev Restrict capacity (for NoSafeRoute tests).
-    function setMaxDeposit(uint256 cap) external {
-        maxDepositAmount = cap;
-    }
-}
-
-/// @dev Minimal oracle stub. Exposes settable optimal vault and freshness.
-contract MockOracle {
-    IDivigentYieldOracle.VaultType public optimalVault = IDivigentYieldOracle.VaultType.AAVE;
-    bool public fresh_ = true;
-    uint256 public lastObservationTime_;
-
-    function getOptimalVault()
-        external
-        view
-        returns (
-            uint256 aaveRate,
-            IDivigentYieldOracle.VaultType vaultType,
-            uint256 morphoRate
-        )
-    {
-        return (0, optimalVault, 0);
-    }
-
-    function isFresh() external view returns (bool) { return fresh_; }
-
-    function lastObservationTime() external view returns (uint256) {
-        return lastObservationTime_;
-    }
-
-    function lastGoodObservationAge() external view returns (uint256) {
-        return block.timestamp - lastObservationTime_;
-    }
-
-    /// @dev No-op: router calls this in a try/catch during deposits.
-    function recordObservation() external {}
-
-    // helpers
-    function setOptimalVault(IDivigentYieldOracle.VaultType v) external { optimalVault = v; }
-    function setFresh(bool f)  external { fresh_ = f; }
-    function setLastObservationTime(uint256 t) external { lastObservationTime_ = t; }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Harness: thin shim that wires mock contracts to router constructor args.
-//  The real DivigentVaultRouter casts addresses to specific interfaces, so we
-//  deploy the mocks and pass them as the appropriate interface addresses.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// @dev Full integration test harness with mock contracts.
+/// @dev Full integration test harness with mock contracts from test/mocks/.
 contract DivigentVaultRouterTest is Test {
-
     // ── Protocol contracts ──────────────────────────────────────────────────
-    DivigentVaultRouter  internal router;
+    DivigentVaultRouter internal router;
     DivigentFeeCollector internal feeCollector;
-    DvUSDC               internal dvUsdc;
+    DvUSDC internal dvUsdc;
 
     // ── Mocks ────────────────────────────────────────────────────────────────
-    MockERC20      internal usdc;
-    MockERC20      internal aToken;
-    MockAavePool   internal aavePool;
+    MockERC20 internal usdc;
+    MockERC20 internal aToken;
+    MockAavePool internal aavePool;
     MockMorphoVault internal morphoVault;
-    MockOracle     internal oracle;
+    MockOracle internal oracle;
 
     // ── Actors ──────────────────────────────────────────────────────────────
-    address internal treasury      = makeAddr("treasury");
+    address internal treasury = makeAddr("treasury");
     address internal emergencyMultisig = makeAddr("multisig");
     address internal alice;
     uint256 internal aliceKey;
-    address internal bob           = makeAddr("bob");
-    address internal operator_     = makeAddr("operator");
+    address internal bob = makeAddr("bob");
+    address internal operator_ = makeAddr("operator");
 
     // ── Constants ────────────────────────────────────────────────────────────
     uint256 internal constant INITIAL_USDC = 100_000e6; // 100k USDC
-    uint256 internal constant MIN_DEPOSIT  = 10e6;
-    uint256 internal constant FEE_BPS      = 1_000;     // 10 %
-    uint256 internal constant BPS_DENOM    = 10_000;
+    uint256 internal constant MIN_DEPOSIT = 10e6;
+    uint256 internal constant FEE_BPS = 1_000; // 10 %
+    uint256 internal constant BPS_DENOM = 10_000;
 
     bytes32 private constant INITIALIZE_FOR_TYPEHASH =
         keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
@@ -250,13 +53,13 @@ contract DivigentVaultRouterTest is Test {
         (alice, aliceKey) = makeAddrAndKey("alice");
 
         // Deploy mock tokens
-        usdc   = new MockERC20("USD Coin", "USDC", 6);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
         aToken = new MockERC20("Aave aUSDC", "aUSDC", 6);
 
         // Deploy mock protocols
-        aavePool    = new MockAavePool(address(usdc), address(aToken));
+        aavePool = new MockAavePool(address(usdc), address(aToken));
         morphoVault = new MockMorphoVault(address(usdc));
-        oracle      = new MockOracle();
+        oracle = new MockOracle();
         oracle.setLastObservationTime(block.timestamp);
 
         // Seed aToken with USDC liquidity for Aave capacity check
@@ -275,15 +78,15 @@ contract DivigentVaultRouterTest is Test {
         uint256 currentNonce = vm.getNonce(address(this));
         address expectedRouterAddr = vm.computeCreateAddress(address(this), currentNonce + 2);
 
-        feeCollector = new DivigentFeeCollector(  // nonce N
+        feeCollector = new DivigentFeeCollector( // nonce N
             address(usdc),
             treasury,
             expectedRouterAddr
         );
 
-        dvUsdc = new DvUSDC(expectedRouterAddr);   // nonce N+1
+        dvUsdc = new DvUSDC(expectedRouterAddr); // nonce N+1
 
-        router = new DivigentVaultRouter(          // nonce N+2 → lands at expectedRouterAddr
+        router = new DivigentVaultRouter( // nonce N+2 → lands at expectedRouterAddr
             address(usdc),
             address(aavePool),
             address(aToken),
@@ -298,8 +101,8 @@ contract DivigentVaultRouterTest is Test {
         assert(address(router) == expectedRouterAddr);
 
         // Fund actors
-        usdc.mint(alice,    INITIAL_USDC);
-        usdc.mint(bob,      INITIAL_USDC);
+        usdc.mint(alice, INITIAL_USDC);
+        usdc.mint(bob, INITIAL_USDC);
         usdc.mint(operator_, INITIAL_USDC);
 
         // Register alice and bob by default
@@ -328,23 +131,19 @@ contract DivigentVaultRouterTest is Test {
     }
 
     /// @dev Build and sign an initializeFor() EIP-712 digest.
-    function _signInitializeFor(
-        uint256 privateKey,
-        address wallet,
-        uint256 deadline
-    ) internal view returns (bytes memory sig) {
+    function _signInitializeFor(uint256 privateKey, address wallet, uint256 deadline)
+        internal
+        view
+        returns (bytes memory sig)
+    {
         uint256 nonce = router.nonces(wallet);
 
-        bytes32 structHash = keccak256(
-            abi.encode(INITIALIZE_FOR_TYPEHASH, wallet, deadline, nonce)
-        );
+        bytes32 structHash = keccak256(abi.encode(INITIALIZE_FOR_TYPEHASH, wallet, deadline, nonce));
 
         // Compute domain separator from router (must match EIP712 impl)
         bytes32 domainSep = keccak256(
             abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes("DivigentVaultRouter")),
                 keccak256(bytes("1")),
                 block.chainid,
@@ -370,7 +169,7 @@ contract DivigentVaultRouterTest is Test {
         _deposit(alice, alice, depositAmount);
 
         // Simulate 5% yield: mint extra USDC to aToken address.
-        // The router reads aToken.balanceOf(router) as Aave assets; we inflate it
+        // The router reads aToken.balanceOf(router) as Aave assets; inflate it
         // by minting aTokens to the router, which mirrors how Aave accrues yield.
         uint256 yieldAmount = depositAmount * 5 / 100;
         aToken.mint(address(router), yieldAmount);
@@ -378,11 +177,15 @@ contract DivigentVaultRouterTest is Test {
         uint256 desiredNet = 50_000e6 + 2_000e6; // want principal + some yield net of fee
 
         uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
-        uint256 predictedOut    = router.previewRedeem(predictedShares, alice);
+        uint256 predictedOut = router.previewRedeem(predictedShares, alice);
 
         // Actual withdraw
         vm.startPrank(alice);
-        uint256 actualOut = router.withdraw(predictedShares, alice, 0 /* no slippage guard */);
+        uint256 actualOut = router.withdraw(
+            predictedShares,
+            alice,
+            0 /* no slippage guard */
+        );
         vm.stopPrank();
 
         // Must be within 1 wei — formula is algebraic, not iterative
@@ -409,6 +212,189 @@ contract DivigentVaultRouterTest is Test {
         _deposit(alice, alice, depositAmount);
         uint256 shares = router.previewWithdrawNet(0, alice);
         assertEq(shares, 0);
+    }
+
+    /// @dev previewWithdrawNet must not under-deliver when the vault is in drawdown.
+    ///      Guarantee: actualOut >= desiredNetUSDC (or capped at walletShares).
+    ///      The closed-form solver assumes yield = gross - principalOut unconditionally
+    ///      and treats negative yield as a fee rebate, inflating what each share returns.
+    ///      In reality withdraw() floors yield at 0 (no negative fee), so the preview
+    ///      solves for too few shares in a loss state.
+    function test_previewWithdrawNet_lossScenario_violatesGuarantee() public {
+        uint256 depositAmount = 1_000e6; // 1000 USDC
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // Simulate a 10% drawdown in the Aave leg (gross < principalOut for alice)
+        aToken.burn(address(router), 100e6);
+        assertEq(router.totalVaultAssets(), 900e6, "Post-loss vault total");
+
+        uint256 desiredNet = 100e6; // want 100 USDC net
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        // Sanity: not capped at walletShares (so the guarantee must hold)
+        uint256 walletShares = dvUsdc.balanceOf(alice);
+        assertLt(predictedShares, walletShares, "Not the cap case");
+
+        // Execute the actual withdraw
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        // The core promise: user receives at least desiredNet (allow 1 wei floor tolerance)
+        assertGe(actualOut, desiredNet - 1, "loss: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev previewWithdrawNet must handle a huge desiredNet relative to tiny position
+    ///      by capping at walletShares without reverting.
+    function test_previewWithdrawNet_tinyShares_hugeDesired() public {
+        uint256 depositAmount = MIN_DEPOSIT; // 10 USDC
+        _deposit(alice, alice, depositAmount);
+
+        uint256 walletShares = dvUsdc.balanceOf(alice);
+
+        // Ask for astronomical net (inside uint128.max to avoid input-overflow revert)
+        uint256 huge = type(uint128).max;
+        uint256 predicted = router.previewWithdrawNet(huge, alice);
+
+        assertEq(predicted, walletShares, "Preview caps at walletShares");
+    }
+
+    /// @dev Fuzz invariant: for any valid (depositAmount, yield/loss, desiredNet),
+    ///      the shares returned by previewWithdrawNet must, when fed into the
+    ///      actual withdraw flow, deliver at least desiredNet.
+    ///
+    ///      Bounds are chosen so that every input reaches the asserting branch
+    ///      — no silent early-returns on dust / cap / zero-shares. A 10k-USDC
+    ///      minimum deposit, ±20% max swing, and desired capped at 95% of
+    ///      position keep `positionValue`, `desired`, `predictedShares`, and
+    ///      `predictedShares < walletShares` all provably non-degenerate.
+    function testFuzz_previewWithdrawNet_withdrawYieldsAtLeastDesired(
+        uint128 depositAmount_,
+        int16 yieldBps_,
+        uint128 desiredNet_
+    ) public {
+        uint256 depositAmount = bound(uint256(depositAmount_), 10_000e6, 100_000e6);
+        // yieldBps in [-2000, +3000] bps ⇒ -20% drawdown to +30% gain.
+        // -20% on 10k min deposit ⇒ positionValue >= 8_000e6; never dust.
+        int256 yieldBps = int256(bound(int256(yieldBps_), -2000, 3000));
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        if (yieldBps > 0) {
+            uint256 gain = (depositAmount * uint256(yieldBps)) / BPS_DENOM;
+            aToken.mint(address(router), gain);
+        } else if (yieldBps < 0) {
+            uint256 loss = (depositAmount * uint256(-yieldBps)) / BPS_DENOM;
+            aToken.burn(address(router), loss);
+        }
+
+        uint256 positionValue = router.previewRedeem(shares, alice);
+        assertGe(positionValue, 8_000e6, "positionValue lower-bounded by -20% on 10k min");
+
+        // Cap desired at 95% of positionValue so predictedShares never hits
+        // the wallet-shares ceiling (the old "capped, guarantee relaxed" escape).
+        uint256 desired = bound(uint256(desiredNet_), 1e6, (positionValue * 95) / 100);
+
+        uint256 predictedShares = router.previewWithdrawNet(desired, alice);
+        assertGt(predictedShares, 0, "preview returned zero shares for non-dust desired");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "preview never hits cap under 95% bound");
+
+        uint256 actualOut = router.previewRedeem(predictedShares, alice);
+        assertGe(actualOut + 1, desired, "actualOut < desired - 1 wei (preview underestimated)");
+    }
+
+    /// @dev Dust-position edge: when the vault's value per share floors to 0
+    ///      (walletShares * A1 / S1 == 0 via Floor rounding), the loss branch
+    ///      would otherwise return shares capped at walletShares that then
+    ///      deliver 0 USDC — violating the >= desiredNet guarantee silently.
+    ///      The preview must return 0 in this degenerate state.
+    function test_previewWithdrawNet_grossAllZero_returnsZero() public {
+        uint256 depositAmount = 1_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // Total vault wipeout: A1 = 0 + 1 = 1, while S1 = 1_000e6 + 1
+        // → grossAll = floor(1_000e6 · 1 / (1_000e6 + 1)) = 0
+        aToken.burn(address(router), depositAmount);
+        assertEq(router.totalVaultAssets(), 0, "Vault must be wiped to hit grossAll=0");
+
+        // Any positive desired is unserviceable; preview must signal via 0
+        uint256 shares = router.previewWithdrawNet(1e6, alice);
+        assertEq(shares, 0, "grossAll=0 must short-circuit to 0 shares");
+    }
+
+    /// @dev Exact break-even boundary: grossAll == costBasis. The loss-branch
+    ///      predicate uses `<=` so this value goes to the loss branch (no fee).
+    ///      Verifies the round-trip still delivers >= desiredNet at the boundary.
+    function test_previewWithdrawNet_lossBranch_exactBreakEven() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // No yield, no loss. grossAll ~= costBasis (modulo the +1 virtual offset).
+        // A=100_000e6, S=100_000e6, walletShares=100_000e6, costBasis=100_000e6
+        //   grossAll = floor(100_000e6 * (100_000e6+1) / (100_000e6+1)) = 100_000e6
+        //   costBasis = 100_000e6 -> grossAll <= costBasis -> loss branch
+        uint256 desiredNet = 10_000e6;
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        assertGt(predictedShares, 0, "Should return non-zero at break-even");
+
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        // Exact boundary; no fee because yield = 0
+        assertGe(actualOut, desiredNet - 1, "break-even: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev Deep loss: 95% drawdown. Exercises the loss branch at an extreme
+    ///      where withdrawing more than the dust-guard threshold is still valid.
+    function test_previewWithdrawNet_lossBranch_deepLoss95() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // 95% drawdown: vault holds 5,000 USDC against 100,000 principal
+        aToken.burn(address(router), 95_000e6);
+        assertEq(router.totalVaultAssets(), 5_000e6, "Deep drawdown applied");
+
+        // Ask for 1k USDC - comfortably within the 5k vault total
+        uint256 desiredNet = 1_000e6;
+        uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
+
+        assertGt(predictedShares, 0, "Returns shares for servable amount");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "Not the cap case");
+
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+
+        assertGe(actualOut, desiredNet - 1, "deep loss: actualOut < desiredNet - 1 wei");
+    }
+
+    /// @dev Cap boundary in loss regime: caller asks for more than their total
+    ///      position value. Preview must cap at walletShares. The >= desiredNet
+    ///      guarantee is intentionally waived in the cap case (user opted for
+    ///      max withdrawal, not a specific amount).
+    function test_previewWithdrawNet_lossBranch_cappedAtWalletShares() public {
+        uint256 depositAmount = 100_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        _deposit(alice, alice, depositAmount);
+
+        // 30% drawdown: position is worth ~70k
+        aToken.burn(address(router), 30_000e6);
+
+        // Ask for 200k (way more than position value of 70k)
+        uint256 predictedShares = router.previewWithdrawNet(200_000e6, alice);
+
+        // Must cap at walletShares
+        assertEq(predictedShares, dvUsdc.balanceOf(alice), "Caps at walletShares in loss");
+
+        // Withdraw delivers full remaining position value - caller gets ~70k, not 200k
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
+        assertApproxEqAbs(actualOut, 70_000e6, 2, "Cap delivers remaining position value");
+        assertLt(actualOut, 200_000e6, "Cap explicitly short-of-desired in this regime");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -450,6 +436,24 @@ contract DivigentVaultRouterTest is Test {
     //  3. Operator authorisation
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// @dev `setOperator(address(0), _)` must revert `ZeroAddress`. Before this
+    ///      test, the error at `DivigentVaultRouter.sol:291` was uncovered —
+    ///      a regression deleting the guard would have silently written
+    ///      `isOperator[wallet][0x0] = true/false`, polluting indexers and
+    ///      introducing a confused-deputy surface.
+    function test_setOperator_reverts_ZeroAddress() public {
+        vm.prank(alice);
+        vm.expectRevert(IDivigentVaultRouter.ZeroAddress.selector);
+        router.setOperator(address(0), true);
+
+        vm.prank(alice);
+        vm.expectRevert(IDivigentVaultRouter.ZeroAddress.selector);
+        router.setOperator(address(0), false);
+
+        // Mapping must remain clean.
+        assertFalse(router.isOperator(alice, address(0)), "no operator state written");
+    }
+
     /// @dev An approved operator can deposit and withdraw on behalf of a wallet.
     function test_operator_canDepositAndWithdraw() public {
         // Alice grants operator_ operator rights
@@ -468,15 +472,14 @@ contract DivigentVaultRouterTest is Test {
         uint256 sharesMinted = router.deposit(depositAmount, alice);
 
         assertEq(dvUsdc.balanceOf(alice), sharesMinted, "Shares minted to alice");
-        assertEq(dvUsdc.balanceOf(operator_), 0,       "Operator receives no shares");
+        assertEq(dvUsdc.balanceOf(operator_), 0, "Operator receives no shares");
 
         // operator_ withdraws on alice's behalf; USDC returns to alice
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
         vm.prank(operator_);
         uint256 returned = router.withdraw(sharesMinted, alice, 0);
 
-        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + returned,
-            "USDC returned to alice, not operator");
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + returned, "USDC returned to alice, not operator");
     }
 
     /// @dev An address that is NOT an approved operator must be rejected.
@@ -518,7 +521,7 @@ contract DivigentVaultRouterTest is Test {
     ///      be touched — even under cumulative rounding.
     function test_partialWithdrawals_principalAttributionCorrect() public {
         uint256 depositAmount = 50_000e6;
-        uint256 yieldAmount   = 5_000e6; // 10% synthetic yield
+        uint256 yieldAmount = 5_000e6; // 10% synthetic yield
 
         // Alice deposits into Aave (default oracle route)
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
@@ -530,9 +533,9 @@ contract DivigentVaultRouterTest is Test {
         aToken.mint(address(router), yieldAmount);
 
         uint256 usdcReturnedTotal = 0;
-        uint256 sharesToRedeem    = totalShares;
-        uint256 withdrawalsCount  = 5;
-        uint256 chunkShares       = sharesToRedeem / withdrawalsCount;
+        uint256 sharesToRedeem = totalShares;
+        uint256 withdrawalsCount = 5;
+        uint256 chunkShares = sharesToRedeem / withdrawalsCount;
 
         for (uint256 i = 0; i < withdrawalsCount; i++) {
             uint256 chunk = (i == withdrawalsCount - 1)
@@ -545,8 +548,7 @@ contract DivigentVaultRouterTest is Test {
         }
 
         // Total returned must be >= depositAmount (principal always safe)
-        assertGe(usdcReturnedTotal, depositAmount,
-            "Principal must be fully returned");
+        assertGe(usdcReturnedTotal, depositAmount, "Principal must be fully returned");
 
         // Fee must be 10% of yield only (never on principal)
         // Net yield to alice = totalReturned - depositAmount
@@ -554,9 +556,12 @@ contract DivigentVaultRouterTest is Test {
         // Gross yield before fee = netYield / (1 - feePct) = netYield * 10 / 9
         // We test the bound: netYield <= yieldAmount (fee was deducted)
         //                    netYield >= yieldAmount * 90% (fee ≤ 10%)
-        assertLe(netYield, yieldAmount,        "Fee must have been deducted from yield");
-        assertGe(netYield * BPS_DENOM, yieldAmount * (BPS_DENOM - FEE_BPS) - 1,
-            "Fee must not exceed 10% of yield (allow 1 wei rounding)");
+        assertLe(netYield, yieldAmount, "Fee must have been deducted from yield");
+        assertGe(
+            netYield * BPS_DENOM,
+            yieldAmount * (BPS_DENOM - FEE_BPS) - 1,
+            "Fee must not exceed 10% of yield (allow 1 wei rounding)"
+        );
 
         // No dvUSDC dust remaining
         assertEq(dvUsdc.balanceOf(alice), 0, "All shares must be redeemed");
@@ -575,7 +580,7 @@ contract DivigentVaultRouterTest is Test {
         _deposit(alice, alice, deposit2);
 
         // Check cost basis reflects both deposits
-        (uint256 basis,, ) = router.getPosition(alice);
+        (uint256 basis,,) = router.getPosition(alice);
         assertEq(basis, deposit1 + deposit2, "Cost basis must equal sum of deposits");
     }
 
@@ -595,12 +600,9 @@ contract DivigentVaultRouterTest is Test {
         router.initializeFor(newWallet, deadline, sig);
         assertTrue(router.authorizedWallets(newWallet), "Wallet must be authorised");
 
-        // Now newWallet is authorised; the nonce has been incremented.
-        // A second call with the SAME sig must revert:
-        // - Either WalletAlreadyAuthorised (authorised check fires first)
-        // - Or InvalidSignature (nonce mismatch)
-        // Either way, replay is rejected.
-        vm.expectRevert(); // accept either error
+        // Second call with the same sig: `authorizedWallets[wallet]` is now true,
+        // so the WalletAlreadyAuthorised check fires first (before any sig work).
+        vm.expectRevert(IDivigentVaultRouter.WalletAlreadyAuthorised.selector);
         router.initializeFor(newWallet, deadline, sig);
     }
 
@@ -612,15 +614,11 @@ contract DivigentVaultRouterTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         // Sign with rogue key, not newWallet's key
         uint256 nonce = router.nonces(newWallet);
-        bytes32 structHash = keccak256(
-            abi.encode(INITIALIZE_FOR_TYPEHASH, newWallet, deadline, nonce)
-        );
+        bytes32 structHash = keccak256(abi.encode(INITIALIZE_FOR_TYPEHASH, newWallet, deadline, nonce));
 
         bytes32 domainSep = keccak256(
             abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes("DivigentVaultRouter")),
                 keccak256(bytes("1")),
                 block.chainid,
@@ -753,7 +751,7 @@ contract DivigentVaultRouterTest is Test {
     /// @dev Fee must equal exactly 10% of yield when yield > 0.
     function test_fee_exactlyTenPercentOfYield() public {
         uint256 depositAmount = 10_000e6;
-        uint256 yieldAmount   = 1_000e6; // 10% yield
+        uint256 yieldAmount = 1_000e6; // 10% yield
 
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
         uint256 shares = _deposit(alice, alice, depositAmount);
@@ -761,19 +759,44 @@ contract DivigentVaultRouterTest is Test {
         // Simulate yield: inflate the router's aToken balance (mirrors Aave rebasing)
         aToken.mint(address(router), yieldAmount);
 
-        uint256 aliceBefore  = usdc.balanceOf(alice);
+        uint256 aliceBefore = usdc.balanceOf(alice);
         uint256 treasuryBefore = usdc.balanceOf(treasury);
 
         vm.prank(alice);
         uint256 returned = router.withdraw(shares, alice, 0);
 
-        uint256 netYield    = returned - depositAmount;
+        uint256 netYield = returned - depositAmount;
         uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
 
         // Fee = 10% of yield; net yield = 90% of yield
         // Allow 1 wei rounding tolerance throughout
         assertApproxEqAbs(feeCollected, yieldAmount / 10, 1, "Fee must be 10% of yield");
         assertApproxEqAbs(netYield, yieldAmount * 9 / 10, 1, "Net yield must be 90% of gross yield");
+    }
+
+    /// @dev Fee must be exactly 0 at the waterline — `actualGross == principalOut`
+    ///      to the wei. This pins the branch `actualGross > principalOut ? ... : 0`
+    ///      at its exact boundary. A regression flipping `>` to `>=` (or any
+    ///      off-by-one in the comparison) would charge a 10 bps fee on zero
+    ///      realised yield, violating INV-2 (principal preservation).
+    function test_fee_exactWaterline_zeroFee() public {
+        uint256 depositAmount = 10_000e6;
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        // Force the Aave leg to hold EXACTLY the principal — no yield, no loss.
+        // setBalance directly pins the waterline; any fee here means the
+        // equality boundary was misclassified as "above waterline".
+        aToken.setBalance(address(router), depositAmount);
+
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+
+        vm.prank(alice);
+        uint256 returned = router.withdraw(shares, alice, 0);
+
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+        assertEq(feeCollected, 0, "fee must be 0 at exact waterline");
+        assertApproxEqAbs(returned, depositAmount, 1, "principal returned in full");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -792,7 +815,9 @@ contract DivigentVaultRouterTest is Test {
         uint256 deposit2 = 200_000e6;
         vm.startPrank(alice);
         usdc.approve(address(router), deposit2);
-        vm.expectRevert();  // TVLCapExceeded
+        vm.expectRevert(
+            abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, deposit2, router.currentTVLCap())
+        );
         router.deposit(deposit2, alice);
         vm.stopPrank();
     }
@@ -863,9 +888,7 @@ contract DivigentVaultRouterTest is Test {
         uint256 minUsdcOut = amount + 1;
 
         vm.startPrank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(IDivigentVaultRouter.SlippageExceeded.selector, amount, minUsdcOut)
-        );
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.SlippageExceeded.selector, amount, minUsdcOut));
         router.withdraw(shares, alice, minUsdcOut);
         vm.stopPrank();
     }
@@ -876,13 +899,17 @@ contract DivigentVaultRouterTest is Test {
 
     /// @dev convertToShares and convertToAssets must be approximate inverses.
     function test_convertRoundTrip(uint96 rawAssets) public {
-        vm.assume(rawAssets >= 1e6 && rawAssets <= 100_000e6);
-        uint256 assets = uint256(rawAssets);
+        // Use `bound` rather than `vm.assume`. The range [1e6, 1e11] covers
+        // ~10^-18 of the uint96 type domain, so `vm.assume` exhausts its
+        // 65_536 rejection budget before the test completes any runs under
+        // coverage-instrumented execution (different fuzz seed distribution).
+        // `bound` maps the input into range deterministically — zero rejections.
+        uint256 assets = bound(uint256(rawAssets), 1e6, 100_000e6);
 
         _deposit(alice, alice, 10_000e6); // ensure non-trivial pool state
 
         uint256 shares = router.convertToShares(assets);
-        uint256 back   = router.convertToAssets(shares);
+        uint256 back = router.convertToAssets(shares);
 
         // Due to integer division, back may be <= assets (round-down), within 1e-6 relative
         assertLe(back, assets + 1, "convertToAssets should be within 1 of original");
@@ -897,7 +924,6 @@ contract DivigentVaultRouterTest is Test {
     function test_totalVaultAssets_reflectsDeposit() public {
         uint256 amount = 25_000e6;
         _deposit(alice, alice, amount);
-        assertApproxEqAbs(router.totalVaultAssets(), amount, 1,
-            "totalVaultAssets must equal deposited USDC");
+        assertApproxEqAbs(router.totalVaultAssets(), amount, 1, "totalVaultAssets must equal deposited USDC");
     }
 }
