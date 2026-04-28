@@ -44,12 +44,16 @@ contract LongHorizonTest is Actions {
             // Allow +/-1 wei rounding noise.
             assertGe(currentPPS + 1, lastPPS, "PPS must be non-decreasing across a yield-only cycle");
 
-            // The view-side accruedYield should track the cumulative yield exactly,
-            // because Alice is the sole depositor (no distribution math involved).
+            // The view-side accruedYield tracks cumulative yield minus the
+            // virtual-offset residual retained for inflation resistance.
             WalletSnap memory mid = snap(holder);
             uint256 expectedAccrued = monthlyYield * (i + 1);
-            assertApproxEqAbs(
-                mid.accruedYield, expectedAccrued, 4, "accruedYield (view) tracks cumulative cycle yield (sole holder)"
+            uint256 residualBound = (expectedAccrued * 1e6) / (deposit_ + 1e6) + 4;
+            assertLe(mid.accruedYield, expectedAccrued, "accruedYield cannot exceed cumulative cycle yield");
+            assertGe(
+                mid.accruedYield + residualBound,
+                expectedAccrued,
+                "accruedYield residual is bounded by virtual share ownership"
             );
 
             lastPPS = currentPPS;
@@ -64,14 +68,16 @@ contract LongHorizonTest is Actions {
         uint256 grossReceived = returned + feeCollected;
         uint256 realisedYield = grossReceived - deposit_;
 
-        // The realised yield should equal the sum of all cycle yields within
-        // rounding. Crucially, the rounding error should be O(1) wei (independent
-        // of cycle count), not O(cycles): otherwise drift would snowball.
+        uint256 residualAssets = router.totalVaultAssets();
+
+        // The realised yield plus virtual residual should equal the sum of all
+        // cycle yields within rounding. Crucially, the rounding error should be
+        // O(1) wei (independent of cycle count), not O(cycles).
         assertApproxEqAbs(
-            realisedYield,
+            realisedYield + residualAssets,
             totalYieldExpected,
             4,
-            "Realised yield over 12 cycles == sum of monthly yields (drift is O(1) not O(cycles))"
+            "Realised yield + residual over 12 cycles == sum of monthly yields"
         );
 
         // Fee is exactly 10% of realised yield.
@@ -87,6 +93,7 @@ contract LongHorizonTest is Actions {
         // Final cleanup checks.
         assertEq(dvUsdc.totalSupply(), 0, "All shares burned");
         assertEq(usdc.balanceOf(address(router)), 0, "Router holds no USDC");
-        assertLe(aToken.balanceOf(address(router)), 4, "aToken dust <= 4 wei after a 12-cycle hold");
+        uint256 finalResidualBound = (totalYieldExpected * 1e6) / (deposit_ + 1e6) + 4;
+        assertLe(aToken.balanceOf(address(router)), finalResidualBound, "aToken residual matches virtual share bound");
     }
 }

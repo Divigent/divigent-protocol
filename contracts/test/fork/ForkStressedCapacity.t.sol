@@ -178,7 +178,8 @@ contract ForkStressedCapacityTest is ForkBase {
         uint256 supply = dvUsdc.totalSupply();
         uint256 aaveBal = aToken.balanceOf(address(router));
         uint256 totalHeld = aaveBal + morphoAssets;
-        uint256 grossEstimate = (shares * (totalHeld + 1)) / (supply + 1);
+        uint256 virtualOffset = 1e6;
+        uint256 grossEstimate = (shares * (totalHeld + virtualOffset)) / (supply + virtualOffset);
 
         uint256 aaveCap = 0; // idle drained
         uint256 morphoCap = morphoMaxW > morphoAssets ? morphoAssets : morphoMaxW;

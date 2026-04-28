@@ -310,17 +310,11 @@ contract DivigentVaultRouterTest is Test {
     ///      deliver 0 USDC — violating the >= desiredNet guarantee silently.
     ///      The preview must return 0 in this degenerate state.
     function test_previewWithdrawNet_grossAllZero_returnsZero() public {
-        uint256 depositAmount = 1_000e6;
-        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
-        _deposit(alice, alice, depositAmount);
-
-        // Total vault wipeout: A1 = 0 + 1 = 1, while S1 = 1_000e6 + 1
-        // → grossAll = floor(1_000e6 · 1 / (1_000e6 + 1)) = 0
-        aToken.burn(address(router), depositAmount);
-        assertEq(router.totalVaultAssets(), 0, "Vault must be wiped to hit grossAll=0");
+        vm.prank(address(router));
+        dvUsdc.mint(alice, 1);
 
         // Any positive desired is unserviceable; preview must signal via 0
-        uint256 shares = router.previewWithdrawNet(1e6, alice);
+        uint256 shares = router.previewWithdrawNet(1, alice);
         assertEq(shares, 0, "grossAll=0 must short-circuit to 0 shares");
     }
 
@@ -332,7 +326,7 @@ contract DivigentVaultRouterTest is Test {
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
         _deposit(alice, alice, depositAmount);
 
-        // No yield, no loss. grossAll ~= costBasis (modulo the +1 virtual offset).
+        // No yield, no loss. grossAll ~= costBasis (modulo the virtual offset).
         // A=100_000e6, S=100_000e6, walletShares=100_000e6, costBasis=100_000e6
         //   grossAll = floor(100_000e6 * (100_000e6+1) / (100_000e6+1)) = 100_000e6
         //   costBasis = 100_000e6 -> grossAll <= costBasis -> loss branch
@@ -395,6 +389,32 @@ contract DivigentVaultRouterTest is Test {
         uint256 actualOut = router.withdraw(predictedShares, alice, 0);
         assertApproxEqAbs(actualOut, 70_000e6, 2, "Cap delivers remaining position value");
         assertLt(actualOut, 200_000e6, "Cap explicitly short-of-desired in this regime");
+    }
+
+    /// @dev With a large virtual offset, deep-loss redemptions can otherwise
+    ///      quote phantom virtual assets. convertToAssets/previewRedeem/withdraw
+    ///      must cap at physical totalAssets.
+    function test_sharesToAssets_capsAtTotalAssets_underDeepLoss() public {
+        uint256 depositAmount = 100_000e6;
+        uint256 postLossAssets = 1e6; // 1 USDC remains
+        uint256 virtualOffset = 1e6;
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        aToken.burn(address(router), depositAmount - postLossAssets);
+        assertEq(router.totalVaultAssets(), postLossAssets, "deep loss applied");
+
+        uint256 uncappedQuote = (shares * (postLossAssets + virtualOffset)) / (dvUsdc.totalSupply() + virtualOffset);
+        assertGt(uncappedQuote, postLossAssets, "precondition: virtual offset would overquote");
+
+        assertEq(router.convertToAssets(shares), postLossAssets, "convertToAssets caps at real assets");
+        assertEq(router.previewRedeem(shares, alice), postLossAssets, "previewRedeem uses capped gross");
+
+        vm.prank(alice);
+        uint256 actualOut = router.withdraw(shares, alice, 0);
+        assertEq(actualOut, postLossAssets, "withdraw returns only physical assets");
+        assertEq(router.totalVaultAssets(), 0, "all physical assets withdrawn");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -516,9 +536,8 @@ contract DivigentVaultRouterTest is Test {
     //  4. Proportional principal attribution across many partial withdrawals
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev After N partial withdrawals, the total fee paid must equal exactly
-    ///      (totalYieldEarned * FEE_BPS / BPS_DENOM), and principal must never
-    ///      be touched — even under cumulative rounding.
+    /// @dev After N partial withdrawals, fees must track realised user yield,
+    ///      and principal must never be touched — even under cumulative rounding.
     function test_partialWithdrawals_principalAttributionCorrect() public {
         uint256 depositAmount = 50_000e6;
         uint256 yieldAmount = 5_000e6; // 10% synthetic yield
@@ -533,6 +552,7 @@ contract DivigentVaultRouterTest is Test {
         aToken.mint(address(router), yieldAmount);
 
         uint256 usdcReturnedTotal = 0;
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 sharesToRedeem = totalShares;
         uint256 withdrawalsCount = 5;
         uint256 chunkShares = sharesToRedeem / withdrawalsCount;
@@ -550,18 +570,15 @@ contract DivigentVaultRouterTest is Test {
         // Total returned must be >= depositAmount (principal always safe)
         assertGe(usdcReturnedTotal, depositAmount, "Principal must be fully returned");
 
-        // Fee must be 10% of yield only (never on principal)
-        // Net yield to alice = totalReturned - depositAmount
-        uint256 netYield = usdcReturnedTotal - depositAmount;
-        // Gross yield before fee = netYield / (1 - feePct) = netYield * 10 / 9
-        // We test the bound: netYield <= yieldAmount (fee was deducted)
-        //                    netYield >= yieldAmount * 90% (fee ≤ 10%)
-        assertLe(netYield, yieldAmount, "Fee must have been deducted from yield");
-        assertGe(
-            netYield * BPS_DENOM,
-            yieldAmount * (BPS_DENOM - FEE_BPS) - 1,
-            "Fee must not exceed 10% of yield (allow 1 wei rounding)"
-        );
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+        uint256 actualGross = usdcReturnedTotal + feeCollected;
+        uint256 actualYield = actualGross - depositAmount;
+        uint256 expectedFee = (actualYield * FEE_BPS) / BPS_DENOM;
+
+        assertLe(actualYield, yieldAmount, "Realised user yield cannot exceed vault yield");
+        assertGe(actualYield, yieldAmount - 1e6, "Virtual offset should retain less than 1 USDC of this yield");
+        assertLe(feeCollected, expectedFee, "Fee must not exceed 10% of realised user yield");
+        assertGe(feeCollected + withdrawalsCount, expectedFee, "Fee floor drift should be at most 1 wei per withdrawal");
 
         // No dvUSDC dust remaining
         assertEq(dvUsdc.balanceOf(alice), 0, "All shares must be redeemed");
@@ -759,8 +776,10 @@ contract DivigentVaultRouterTest is Test {
         // Simulate yield: inflate the router's aToken balance (mirrors Aave rebasing)
         aToken.mint(address(router), yieldAmount);
 
-        uint256 aliceBefore = usdc.balanceOf(alice);
         uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 expectedGross = router.convertToAssets(shares);
+        uint256 expectedYield = expectedGross - depositAmount;
+        uint256 expectedFee = feeCollector.calculateFee(expectedYield);
 
         vm.prank(alice);
         uint256 returned = router.withdraw(shares, alice, 0);
@@ -768,10 +787,9 @@ contract DivigentVaultRouterTest is Test {
         uint256 netYield = returned - depositAmount;
         uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
 
-        // Fee = 10% of yield; net yield = 90% of yield
-        // Allow 1 wei rounding tolerance throughout
-        assertApproxEqAbs(feeCollected, yieldAmount / 10, 1, "Fee must be 10% of yield");
-        assertApproxEqAbs(netYield, yieldAmount * 9 / 10, 1, "Net yield must be 90% of gross yield");
+        assertEq(feeCollected, expectedFee, "Fee must be 10% of realised user yield");
+        assertEq(netYield, expectedYield - expectedFee, "Net yield must match realised yield after fee");
+        assertGe(expectedYield, yieldAmount - 1e6, "Virtual offset should retain less than 1 USDC of this yield");
     }
 
     /// @dev Fee must be exactly 0 at the waterline — `actualGross == principalOut`

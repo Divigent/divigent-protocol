@@ -102,10 +102,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///         and ensures share minting doesn't degenerate to zero).
     uint256 public constant MIN_DEPOSIT = 10e6;
 
-    /// @notice Virtual offset used in share minting to prevent first-depositor attacks.
-    ///         Adding 1 to both totalSupply and totalAssets makes the first deposit
-    ///         behave identically to subsequent deposits — no inflation vector.
-    uint256 private constant VIRTUAL_OFFSET = 1;
+    /// @notice Virtual assets/shares used in share minting and redemption math.
+    /// @dev Sized to USDC/dvUSDC's 6 decimals. This keeps first deposits 1:1
+    ///      while making donation-style share-price inflation economically impractical.
+    uint256 private constant VIRTUAL_OFFSET = 1e6;
 
     /// @dev EIP-712 type hash for the initializeFor() signed authorisation.
     ///      Nonce is included so each signature is single-use by construction,
@@ -615,14 +615,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///      for shares, breaking the ">= desiredNetUSDC" guarantee.
     ///
     ///      (1) Loss branch (grossAll <= costBasis):
-    ///            net = gross = s * (A+1) / (S+1)
-    ///            s   = ceil(desiredNet * (S+1) / (A+1))
+    ///            net = gross = s * (A+VIRTUAL_OFFSET) / (S+VIRTUAL_OFFSET)
+    ///            s   = ceil(desiredNet * (S+VIRTUAL_OFFSET) / (A+VIRTUAL_OFFSET))
     ///
     ///      (2) Profit branch (grossAll > costBasis):
     ///            net = gross * (1 - feeBps/bpsDen) + principalOut * (feeBps/bpsDen)
-    ///            s   = desiredNet * bpsDen * walletShares * (S+1)
-    ///                / [ (bpsDen - feeBps) * walletShares * (A+1)
-    ///                  + feeBps * costBasis * (S+1) ]
+    ///            s   = desiredNet * bpsDen * walletShares * (S+VIRTUAL_OFFSET)
+    ///                / [ (bpsDen - feeBps) * walletShares * (A+VIRTUAL_OFFSET)
+    ///                  + feeBps * costBasis * (S+VIRTUAL_OFFSET) ]
     ///
     ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC, and
     ///      cap at walletShares (position value is a hard ceiling on what can be
@@ -802,10 +802,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        shares = amount * (totalSupply + VIRTUAL_OFFSET)
     ///                        / (totalAssets + VIRTUAL_OFFSET)
     ///
-    ///      The virtual offset (+1 to both numerator and denominator) prevents the
-    ///      classic first-depositor inflation attack where an attacker mints 1 share,
-    ///      donates a large amount, then makes a victim's deposit round down to 0 shares.
-    ///      With the offset, the minimum share mint is 1 regardless of pool state.
+    ///      The virtual offset acts as a 1-USDC / 1-dvUSDC virtual seed. This
+    ///      preserves 1:1 genesis minting while keeping early share resolution
+    ///      high enough that donation-based inflation cannot cheaply force
+    ///      ordinary deposits into zero-share or large floor-loss outcomes.
     ///
     ///      Rounding: floor (in vault's favour) to prevent share inflation.
     function _assetsToShares(
@@ -823,7 +823,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        assets = shares * (totalAssets + VIRTUAL_OFFSET)
     ///                        / (totalSupply + VIRTUAL_OFFSET)
     ///
-    ///      Rounding: floor (in vault's favour).
+    ///      Rounding: floor (in vault's favour). The result is capped at
+    ///      totalAssets so virtual assets cannot overstate redemption value
+    ///      after an underlying loss.
     function _sharesToAssets(
         uint256 shares,
         uint256 totalAssets_,
@@ -831,6 +833,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ) internal pure returns (uint256 assets) {
         assets = (shares * (totalAssets_ + VIRTUAL_OFFSET))
                / (totalSupply_ + VIRTUAL_OFFSET);
+        if (assets > totalAssets_) assets = totalAssets_;
     }
 
     // ── Internal: Amount-Aware Vault Capacity ─────────────────────────────────

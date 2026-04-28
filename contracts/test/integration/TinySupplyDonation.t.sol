@@ -9,7 +9,7 @@ import {Actions} from "./helpers/Actions.sol";
 ///         a very small `totalSupply` paired with a very large donation
 ///         (aToken mint, direct Morpho `accrueYield`, etc.).
 ///
-///         Without the virtual offset (`VIRTUAL_OFFSET = 1`) in the share
+///         Without a meaningful virtual offset in the share
 ///         maths, an attacker could:
 ///           1. Deposit 1 wei (gets 1 share).
 ///           2. Donate 1e18 USDC directly to the router's aToken balance.
@@ -18,7 +18,8 @@ import {Actions} from "./helpers/Actions.sol";
 ///              principal.
 ///
 ///         The router's defence is twofold:
-///           - `VIRTUAL_OFFSET` breaks the exact division-by-zero trap
+///           - `VIRTUAL_OFFSET` raises the donation cost needed to force
+///             zero-share or large floor-loss deposit outcomes.
 ///             (victim always gets at least 1 share).
 ///           - The attack is NOT PROFITABLE: the attacker sacrifices the
 ///             donation, which goes into the vault's PPS and benefits every

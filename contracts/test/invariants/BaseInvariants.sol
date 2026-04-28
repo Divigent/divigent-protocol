@@ -39,6 +39,18 @@ import {PermitHandler} from "./handlers/PermitHandler.sol";
 ///           - Router-O  capacity ↔ revert liveness (probing)
 ///           - Accounting-E per-user non-dilution (snapshot-gated)
 abstract contract BaseInvariants is Test {
+    uint256 internal constant ROUTER_VIRTUAL_OFFSET = 1e6;
+
+    /// @dev Must mirror DivigentVaultRouter._sharesToAssets, including the
+    ///      totalAssets cap applied after the virtual-offset calculation.
+    function _sharesToAssetsMirror(uint256 shares, uint256 totalAssets_, uint256 totalSupply_)
+        internal
+        pure
+        returns (uint256 assets)
+    {
+        assets = (shares * (totalAssets_ + ROUTER_VIRTUAL_OFFSET)) / (totalSupply_ + ROUTER_VIRTUAL_OFFSET);
+        if (assets > totalAssets_) assets = totalAssets_;
+    }
 
     // ── Protocol contracts ────────────────────────────────────────────────────
     DivigentVaultRouter internal _router;
@@ -100,14 +112,13 @@ abstract contract BaseInvariants is Test {
         }
 
         uint256 totalFees = _usdc.balanceOf(_treasury);
-        uint256 ops = _depositHandler.depositCount()
-            + _withdrawHandler.withdrawCount()
-            + _permitHandler.permitDepositCount();
+        uint256 ops =
+            _depositHandler.depositCount() + _withdrawHandler.withdrawCount() + _permitHandler.permitDepositCount();
         // External losses (aToken burn, Morpho TVA deflation) legitimately reduce
         // totalAssets without reducing sumCostBasis. Allow loss as deficit budget.
         uint256 totalLoss = _yieldHandler.totalLossAccrued();
         // `ops * 2 wei` absorbs the virtual-offset flooring in the router's
-        // own share math (+1 offset loses at most 1-2 wei per deposit/withdraw).
+        // own share math.
         // Morpho share math is single-floored via mulDiv (≤1 wei per call) so
         // no separate morphoDrift term is needed.
         uint256 tolerance = totalFees + totalLoss + ops * 2;
@@ -136,15 +147,14 @@ abstract contract BaseInvariants is Test {
         uint256 totalFees = _usdc.balanceOf(_treasury);
         uint256 totalYield = _yieldHandler.totalYieldAccrued();
         uint256 totalLoss = _yieldHandler.totalLossAccrued();
-        uint256 ops = _depositHandler.depositCount()
-            + _withdrawHandler.withdrawCount()
-            + _permitHandler.permitDepositCount();
+        uint256 ops =
+            _depositHandler.depositCount() + _withdrawHandler.withdrawCount() + _permitHandler.permitDepositCount();
 
         for (uint256 i = 0; i < _allActors.length; i++) {
             uint256 shares = _dvUsdc.balanceOf(_allActors[i]);
             if (shares == 0) continue;
 
-            uint256 currentValue = (shares * (totalAssets_ + 1)) / (totalSupply_ + 1);
+            uint256 currentValue = _sharesToAssetsMirror(shares, totalAssets_, totalSupply_);
             uint256 costBasis = _router.costBasisUSDC(_allActors[i]);
 
             // Tolerance: fees that left + yield that could have left + external
@@ -163,11 +173,7 @@ abstract contract BaseInvariants is Test {
     ///         USDC.balanceOf(router) == 0 between transactions.
     ///         The router never holds USDC at rest.
     function assert_router_invariant_E() public view {
-        assertEq(
-            _usdc.balanceOf(address(_router)),
-            0,
-            "Router-E VIOLATED: Router holds USDC between transactions"
-        );
+        assertEq(_usdc.balanceOf(address(_router)), 0, "Router-E VIOLATED: Router holds USDC between transactions");
     }
 
     /// @notice Router-F: Permissionless exit
@@ -185,8 +191,9 @@ abstract contract BaseInvariants is Test {
                 uint256 snap = vm.snapshot();
                 vm.prank(_allActors[i]);
                 try _router.withdraw(1, _allActors[i], 0) {
-                    // Success: INV-E holds
-                } catch (bytes memory reason) {
+                // Success: INV-E holds
+                }
+                catch (bytes memory reason) {
                     bytes4 pausedSelector = bytes4(keccak256("DepositsPausedError()"));
                     if (bytes4(reason) == pausedSelector) {
                         vm.revertTo(snap);
@@ -208,11 +215,7 @@ abstract contract BaseInvariants is Test {
             uint256 costBasis = _router.costBasisUSDC(_allActors[i]);
 
             if (shares == 0) {
-                assertEq(
-                    costBasis,
-                    0,
-                    "Router-G VIOLATED: zero shares but non-zero costBasis (phantom principal)"
-                );
+                assertEq(costBasis, 0, "Router-G VIOLATED: zero shares but non-zero costBasis (phantom principal)");
             }
         }
     }
@@ -226,11 +229,7 @@ abstract contract BaseInvariants is Test {
             uint256 shares = _dvUsdc.balanceOf(_allActors[i]);
 
             if (costBasis > 0) {
-                assertGt(
-                    shares,
-                    0,
-                    "Router-H VIOLATED: non-zero costBasis but zero shares"
-                );
+                assertGt(shares, 0, "Router-H VIOLATED: non-zero costBasis but zero shares");
             }
         }
     }
@@ -243,9 +242,7 @@ abstract contract BaseInvariants is Test {
         uint256 totalAssets = _router.totalVaultAssets();
 
         assertEq(
-            totalAssets,
-            aaveAssets + morphoAssets,
-            "Router-I VIOLATED: totalVaultAssets != aave + morpho allocation"
+            totalAssets, aaveAssets + morphoAssets, "Router-I VIOLATED: totalVaultAssets != aave + morpho allocation"
         );
     }
 
@@ -261,11 +258,7 @@ abstract contract BaseInvariants is Test {
         uint256 totalAssets = _router.totalVaultAssets();
         uint256 yieldAccrued = _yieldHandler.totalYieldAccrued();
 
-        assertLe(
-            totalAssets,
-            cap + yieldAccrued,
-            "Router-J VIOLATED: totalVaultAssets exceeds TVL cap + accrued yield"
-        );
+        assertLe(totalAssets, cap + yieldAccrued, "Router-J VIOLATED: totalVaultAssets exceeds TVL cap + accrued yield");
     }
 
     /// @notice Router-K: Authorized wallet consistency
@@ -288,11 +281,7 @@ abstract contract BaseInvariants is Test {
     ///         The schedule is 500k -> 2M -> unlimited. Time only moves forward.
     function assert_router_invariant_L() public {
         uint256 currentCap = _router.currentTVLCap();
-        assertGe(
-            currentCap,
-            _lastTVLCap,
-            "Router-L VIOLATED: TVL cap decreased"
-        );
+        assertGe(currentCap, _lastTVLCap, "Router-L VIOLATED: TVL cap decreased");
         _lastTVLCap = currentCap;
     }
 
@@ -319,10 +308,7 @@ abstract contract BaseInvariants is Test {
                 vm.stopPrank();
                 vm.revertTo(snap);
 
-                assertTrue(
-                    reverted,
-                    "Router-M VIOLATED: deposit succeeded while paused"
-                );
+                assertTrue(reverted, "Router-M VIOLATED: deposit succeeded while paused");
                 return;
             }
         }
@@ -346,8 +332,8 @@ abstract contract BaseInvariants is Test {
 
             uint256 totalAssets = _router.totalVaultAssets();
             uint256 supply = _dvUsdc.totalSupply();
-            // Mirror the router's internal _sharesToAssets (VIRTUAL_OFFSET = 1).
-            uint256 grossEstimate = (shares * (totalAssets + 1)) / (supply + 1);
+            // Mirror the router's internal _sharesToAssets.
+            uint256 grossEstimate = _sharesToAssetsMirror(shares, totalAssets, supply);
             uint256 costBasis = _router.costBasisUSDC(actor);
 
             // Skip if not strictly underwater (with a 2-wei margin for the
@@ -405,7 +391,7 @@ abstract contract BaseInvariants is Test {
             if (totalHeld == 0) continue; // withdraw would revert ZeroAmount
 
             uint256 supply = _dvUsdc.totalSupply();
-            uint256 grossEstimate = (shares * (totalHeld + 1)) / (supply + 1);
+            uint256 grossEstimate = _sharesToAssetsMirror(shares, totalHeld, supply);
             if (grossEstimate == 0) continue; // degenerate dust
 
             uint256 aaveIdle = _usdc.balanceOf(address(_aToken));
@@ -430,7 +416,7 @@ abstract contract BaseInvariants is Test {
             } catch (bytes memory reason) {
                 bytes4 sel = bytes4(reason);
                 bytes4 insufficient = bytes4(keccak256("InsufficientVaultLiquidity(uint256,uint256)"));
-                bytes4 panic        = bytes4(0x4e487b71); // Panic(uint256)
+                bytes4 panic = bytes4(0x4e487b71); // Panic(uint256)
 
                 if (!shouldSucceed && sel != insufficient) {
                     vm.revertTo(snap);
@@ -468,11 +454,7 @@ abstract contract BaseInvariants is Test {
     ///         dvUSDC.VAULT_ROUTER() == address(router). The mint/burn gate
     ///         is permanently wired to the correct router.
     function assert_dvUsdc_invariant_B() public view {
-        assertEq(
-            _dvUsdc.VAULT_ROUTER(),
-            address(_router),
-            "dvUSDC-B VIOLATED: VAULT_ROUTER mismatch"
-        );
+        assertEq(_dvUsdc.VAULT_ROUTER(), address(_router), "dvUSDC-B VIOLATED: VAULT_ROUTER mismatch");
     }
 
     /// @notice dvUSDC-C: Supply consistency
@@ -484,11 +466,7 @@ abstract contract BaseInvariants is Test {
             sumBalances += _dvUsdc.balanceOf(_allActors[i]);
         }
 
-        assertEq(
-            _dvUsdc.totalSupply(),
-            sumBalances,
-            "dvUSDC-C VIOLATED: totalSupply != sum of actor balances"
-        );
+        assertEq(_dvUsdc.totalSupply(), sumBalances, "dvUSDC-C VIOLATED: totalSupply != sum of actor balances");
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -499,21 +477,13 @@ abstract contract BaseInvariants is Test {
     ///         USDC.balanceOf(feeCollector) == 0 after every operation.
     ///         FeeCollector holds USDC only transiently during collectFee().
     function assert_feeCollector_invariant_A() public view {
-        assertEq(
-            _usdc.balanceOf(address(_feeCollector)),
-            0,
-            "FeeCollector-A VIOLATED: FeeCollector holds USDC"
-        );
+        assertEq(_usdc.balanceOf(address(_feeCollector)), 0, "FeeCollector-A VIOLATED: FeeCollector holds USDC");
     }
 
     /// @notice FeeCollector-B: Access control
     ///         FeeCollector.VAULT_ROUTER() == address(router).
     function assert_feeCollector_invariant_B() public view {
-        assertEq(
-            _feeCollector.VAULT_ROUTER(),
-            address(_router),
-            "FeeCollector-B VIOLATED: VAULT_ROUTER mismatch"
-        );
+        assertEq(_feeCollector.VAULT_ROUTER(), address(_router), "FeeCollector-B VIOLATED: VAULT_ROUTER mismatch");
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -538,11 +508,7 @@ abstract contract BaseInvariants is Test {
         // events. Skip the monotonicity check when losses have increased since
         // the last observation — losses legitimately deflate PPS.
         if (currentLoss == _lastLossSnapshot) {
-            assertGe(
-                currentPPS,
-                _lastPricePerShare,
-                "Oracle-A VIOLATED: pricePerShare decreased without loss event"
-            );
+            assertGe(currentPPS, _lastPricePerShare, "Oracle-A VIOLATED: pricePerShare decreased without loss event");
         }
 
         _lastPricePerShare = currentPPS;
@@ -553,11 +519,7 @@ abstract contract BaseInvariants is Test {
     ///         lastObservationTime <= block.timestamp always.
     function assert_oracle_invariant_B() public view {
         uint256 lastObs = _oracle.lastObservationTime();
-        assertLe(
-            lastObs,
-            block.timestamp,
-            "Oracle-B VIOLATED: lastObservationTime is in the future"
-        );
+        assertLe(lastObs, block.timestamp, "Oracle-B VIOLATED: lastObservationTime is in the future");
     }
 
     /// @notice Oracle-C: Freshness consistency
@@ -570,9 +532,7 @@ abstract contract BaseInvariants is Test {
 
         if (fresh) {
             assertLe(
-                block.timestamp - lastObs,
-                maxStaleness,
-                "Oracle-C VIOLATED: isFresh() true but elapsed > MAX_STALENESS"
+                block.timestamp - lastObs, maxStaleness, "Oracle-C VIOLATED: isFresh() true but elapsed > MAX_STALENESS"
             );
         } else {
             assertGt(
@@ -599,38 +559,33 @@ abstract contract BaseInvariants is Test {
         uint256 actualAssets = _router.totalVaultAssets();
 
         assertApproxEqAbs(
-            impliedAssets,
-            actualAssets,
-            1e6,
-            "ShareAsset-A VIOLATED: supply * PPS diverges from totalVaultAssets"
+            impliedAssets, actualAssets, 1e6, "ShareAsset-A VIOLATED: supply * PPS diverges from totalVaultAssets"
         );
     }
 
-    /// @notice ShareAsset-B: Value conservation per-user
-    ///         sum(getPosition.currentValue) for all actors ~= totalVaultAssets.
-    ///         Every unit of vault value is accounted for by some user's shares.
-    ///         Tolerance scales with PPS: each sharesToAssets call floors by up to
-    ///         (totalAssets+1)/(totalSupply+1) ≈ PPS/1e18. With N actors, max drift
-    ///         is N * PPS/1e18.
+    /// @notice ShareAsset-B: Value conservation per-user.
+    ///         sum(getPosition.currentValue) for all actors equals totalVaultAssets
+    ///         modulo the virtual share's residual value and per-user flooring.
     function assert_shareAsset_invariant_B() public view {
         uint256 supply = _dvUsdc.totalSupply();
         if (supply == 0) return;
 
         uint256 sumValues = 0;
         for (uint256 i = 0; i < _allActors.length; i++) {
-            (, uint256 currentValue, ) = _router.getPosition(_allActors[i]);
+            (, uint256 currentValue,) = _router.getPosition(_allActors[i]);
             sumValues += currentValue;
         }
 
         uint256 totalAssets = _router.totalVaultAssets();
-        uint256 ppsRaw = totalAssets / supply + 1;
-        uint256 tolerance = _allActors.length * ppsRaw;
+        uint256 virtualDrift = totalAssets >= supply
+            ? ((totalAssets - supply) * ROUTER_VIRTUAL_OFFSET) / (supply + ROUTER_VIRTUAL_OFFSET)
+            : ((supply - totalAssets) * ROUTER_VIRTUAL_OFFSET) / (supply + ROUTER_VIRTUAL_OFFSET);
+        uint256 floorDrift =
+            _allActors.length * ((totalAssets + ROUTER_VIRTUAL_OFFSET) / (supply + ROUTER_VIRTUAL_OFFSET) + 1);
+        uint256 tolerance = virtualDrift + floorDrift;
 
         assertApproxEqAbs(
-            sumValues,
-            totalAssets,
-            tolerance,
-            "ShareAsset-B VIOLATED: sum of user values != totalVaultAssets"
+            sumValues, totalAssets, tolerance, "ShareAsset-B VIOLATED: sum of user values != totalVaultAssets"
         );
     }
 
@@ -651,11 +606,7 @@ abstract contract BaseInvariants is Test {
         for (uint256 i = 0; i < 4; i++) {
             uint256 shares = _router.convertToShares(testAmounts[i]);
             uint256 roundTrip = _router.convertToAssets(shares);
-            assertLe(
-                roundTrip,
-                testAmounts[i],
-                "ShareMath-B VIOLATED: round-trip created value from nothing"
-            );
+            assertLe(roundTrip, testAmounts[i], "ShareMath-B VIOLATED: round-trip created value from nothing");
         }
     }
 
@@ -671,11 +622,7 @@ abstract contract BaseInvariants is Test {
         uint256 totalFees = _usdc.balanceOf(_treasury);
         uint256 totalYield = _yieldHandler.totalYieldAccrued();
 
-        assertLe(
-            totalFees,
-            totalYield,
-            "Accounting-A VIOLATED: cumulative fees exceed total yield accrued"
-        );
+        assertLe(totalFees, totalYield, "Accounting-A VIOLATED: cumulative fees exceed total yield accrued");
     }
 
     /// @notice Accounting-B: Net flow consistency
@@ -683,22 +630,16 @@ abstract contract BaseInvariants is Test {
     ///         Tolerance: 1 USDC per operation for rounding accumulation.
     function assert_accounting_invariant_B() public view {
         uint256 totalAssets = _router.totalVaultAssets();
-        uint256 deposited = _depositHandler.totalDeposited()
-            + _operatorHandler.totalOperatorDeposited()
+        uint256 deposited = _depositHandler.totalDeposited() + _operatorHandler.totalOperatorDeposited()
             + _permitHandler.totalPermitDeposited();
-        uint256 withdrawn = _withdrawHandler.totalWithdrawn()
-            + _operatorHandler.totalOperatorWithdrawn();
+        uint256 withdrawn = _withdrawHandler.totalWithdrawn() + _operatorHandler.totalOperatorWithdrawn();
         uint256 yield_ = _yieldHandler.totalYieldAccrued();
         uint256 losses = _yieldHandler.totalLossAccrued();
         uint256 fees = _usdc.balanceOf(_treasury);
 
-        uint256 ops = _depositHandler.depositCount()
-            + _withdrawHandler.withdrawCount()
-            + _yieldHandler.yieldCount()
-            + _yieldHandler.lossCount()
-            + _operatorHandler.operatorDepositCount()
-            + _operatorHandler.operatorWithdrawCount()
-            + _permitHandler.permitDepositCount();
+        uint256 ops = _depositHandler.depositCount() + _withdrawHandler.withdrawCount() + _yieldHandler.yieldCount()
+            + _yieldHandler.lossCount() + _operatorHandler.operatorDepositCount()
+            + _operatorHandler.operatorWithdrawCount() + _permitHandler.permitDepositCount();
         uint256 tolerance = ops * 4 + 1e6;
 
         // Losses are an outflow (external value destruction in Aave/Morpho).
@@ -708,17 +649,10 @@ abstract contract BaseInvariants is Test {
         if (totalIn >= totalOut) {
             uint256 expected = totalIn - totalOut;
             assertApproxEqAbs(
-                totalAssets,
-                expected,
-                tolerance,
-                "Accounting-B VIOLATED: net flow diverges from totalVaultAssets"
+                totalAssets, expected, tolerance, "Accounting-B VIOLATED: net flow diverges from totalVaultAssets"
             );
         } else {
-            assertLe(
-                totalAssets,
-                tolerance,
-                "Accounting-B VIOLATED: totalAssets non-zero but inflows < outflows"
-            );
+            assertLe(totalAssets, tolerance, "Accounting-B VIOLATED: totalAssets non-zero but inflows < outflows");
         }
     }
 
@@ -734,8 +668,7 @@ abstract contract BaseInvariants is Test {
     function assert_accounting_invariant_D() public view {
         uint256 treasuryBal = _usdc.balanceOf(_treasury);
         // Realized yield sums BOTH direct-user and operator-delegated withdrawals.
-        uint256 realizedYield = _withdrawHandler.totalRealizedYield()
-            + _operatorHandler.totalOperatorRealizedYield();
+        uint256 realizedYield = _withdrawHandler.totalRealizedYield() + _operatorHandler.totalOperatorRealizedYield();
 
         uint256 feeBps = _feeCollector.FEE_BPS();
         uint256 bpsDenom = _feeCollector.BPS_DENOMINATOR();
@@ -744,8 +677,7 @@ abstract contract BaseInvariants is Test {
 
         // Rounding tolerance: each withdraw can under- or over-attribute by at
         // most 2 wei (fee floor + gross floor). Scale linearly with ops.
-        uint256 ops = _withdrawHandler.withdrawCount()
-            + _operatorHandler.operatorWithdrawCount();
+        uint256 ops = _withdrawHandler.withdrawCount() + _operatorHandler.operatorWithdrawCount();
         uint256 tolerance = ops * 2;
 
         assertApproxEqAbs(
@@ -769,11 +701,9 @@ abstract contract BaseInvariants is Test {
     ///         floor + fee-calc floor drift from the intervening state change.
     function assert_accounting_invariant_E() public {
         uint256 currentLoss = _yieldHandler.totalLossAccrued();
-        uint256 currentWithdraws = _withdrawHandler.withdrawCount()
-            + _operatorHandler.operatorWithdrawCount();
+        uint256 currentWithdraws = _withdrawHandler.withdrawCount() + _operatorHandler.operatorWithdrawCount();
 
-        bool safeToCheck = (currentLoss == _lastLossSnapshotE)
-            && (currentWithdraws == _lastWithdrawCountE);
+        bool safeToCheck = (currentLoss == _lastLossSnapshotE) && (currentWithdraws == _lastWithdrawCountE);
 
         for (uint256 i = 0; i < _allActors.length; i++) {
             address actor = _allActors[i];
@@ -816,11 +746,7 @@ abstract contract BaseInvariants is Test {
     function assert_operator_invariant_A() public view {
         address op = _operatorHandler.operator();
         uint256 initial = _operatorHandler.INITIAL_OPERATOR_BALANCE();
-        assertEq(
-            _usdc.balanceOf(op),
-            initial,
-            "Operator-A VIOLATED: operator USDC balance changed from initial"
-        );
+        assertEq(_usdc.balanceOf(op), initial, "Operator-A VIOLATED: operator USDC balance changed from initial");
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -829,48 +755,48 @@ abstract contract BaseInvariants is Test {
 
     function assertAllInvariants() public {
         // VaultRouter (13)
-        assert_router_invariant_A();  // Aggregate solvency
-        assert_router_invariant_B();  // Per-user solvency
-        assert_router_invariant_E();  // Statelessness
-        assert_router_invariant_F();  // Permissionless exit
-        assert_router_invariant_G();  // Zero shares -> zero costBasis
-        assert_router_invariant_H();  // Nonzero costBasis -> nonzero shares
-        assert_router_invariant_I();  // Vault asset decomposition
-        assert_router_invariant_J();  // TVL cap respected
-        assert_router_invariant_K();  // Authorized wallet consistency
-        assert_router_invariant_L();  // TVL cap monotonicity
-        assert_router_invariant_M();  // Pause blocks deposits
-        assert_router_invariant_N();  // Fee-zero under underwater exits
-        assert_router_invariant_O();  // Capacity ↔ revert liveness
+        assert_router_invariant_A(); // Aggregate solvency
+        assert_router_invariant_B(); // Per-user solvency
+        assert_router_invariant_E(); // Statelessness
+        assert_router_invariant_F(); // Permissionless exit
+        assert_router_invariant_G(); // Zero shares -> zero costBasis
+        assert_router_invariant_H(); // Nonzero costBasis -> nonzero shares
+        assert_router_invariant_I(); // Vault asset decomposition
+        assert_router_invariant_J(); // TVL cap respected
+        assert_router_invariant_K(); // Authorized wallet consistency
+        assert_router_invariant_L(); // TVL cap monotonicity
+        assert_router_invariant_M(); // Pause blocks deposits
+        assert_router_invariant_N(); // Fee-zero under underwater exits
+        assert_router_invariant_O(); // Capacity ↔ revert liveness
 
         // dvUSDC (3)
-        assert_dvUsdc_invariant_A();  // Non-transferable
-        assert_dvUsdc_invariant_B();  // Access control
-        assert_dvUsdc_invariant_C();  // Supply consistency
+        assert_dvUsdc_invariant_A(); // Non-transferable
+        assert_dvUsdc_invariant_B(); // Access control
+        assert_dvUsdc_invariant_C(); // Supply consistency
 
         // FeeCollector (2)
-        assert_feeCollector_invariant_A();  // Pass-through
-        assert_feeCollector_invariant_B();  // Access control
+        assert_feeCollector_invariant_A(); // Pass-through
+        assert_feeCollector_invariant_B(); // Access control
 
         // Oracle (3)
-        assert_oracle_invariant_A();  // PPS monotonic
-        assert_oracle_invariant_B();  // Observation time valid
-        assert_oracle_invariant_C();  // Freshness consistency
+        assert_oracle_invariant_A(); // PPS monotonic
+        assert_oracle_invariant_B(); // Observation time valid
+        assert_oracle_invariant_C(); // Freshness consistency
 
         // Share-Asset (2)
-        assert_shareAsset_invariant_A();  // supply * PPS ~= totalAssets
-        assert_shareAsset_invariant_B();  // Per-user value conservation
+        assert_shareAsset_invariant_A(); // supply * PPS ~= totalAssets
+        assert_shareAsset_invariant_B(); // Per-user value conservation
 
         // Share Math (1)
-        assert_shareMath_invariant_B();   // ERC-4626 round-trip loss
+        assert_shareMath_invariant_B(); // ERC-4626 round-trip loss
 
         // Accounting (4)
-        assert_accounting_invariant_A();  // Fees <= yield
-        assert_accounting_invariant_B();  // Net flow consistency
-        assert_accounting_invariant_D();  // Exact fee-yield closure
-        assert_accounting_invariant_E();  // Per-user non-dilution
+        assert_accounting_invariant_A(); // Fees <= yield
+        assert_accounting_invariant_B(); // Net flow consistency
+        assert_accounting_invariant_D(); // Exact fee-yield closure
+        assert_accounting_invariant_E(); // Per-user non-dilution
 
         // Operator (1)
-        assert_operator_invariant_A();    // Operator never accumulates USDC
+        assert_operator_invariant_A(); // Operator never accumulates USDC
     }
 }

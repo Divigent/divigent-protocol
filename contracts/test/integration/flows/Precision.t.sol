@@ -81,16 +81,20 @@ contract PrecisionTest is Actions {
         uint256 totalFee = usdc.balanceOf(treasury) - treasuryBefore;
         uint256 totalGross = totalReturned + totalFee;
 
-        // Gross should equal deposit + yield within 40 wei (2 wei per partial * 20).
-        assertApproxEqAbs(
-            totalGross,
-            deposit_ + yieldAmount,
-            40,
-            "20-partial cumulative gross == deposit + yield (drift bounded linearly in n)"
-        );
+        uint256 residualAssets = router.totalVaultAssets();
 
-        // Total fee should equal 10% of yield, within the same linear bound.
-        assertApproxEqAbs(totalFee, yieldAmount / 10, 40, "20-partial cumulative fee == 10% of yield");
+        // Gross plus the virtual-offset residual should equal deposit + yield
+        // within 40 wei (2 wei per partial * 20).
+        assertApproxEqAbs(
+            totalGross + residualAssets, deposit_ + yieldAmount, 40, "20-partial gross + residual == deposit + yield"
+        );
+        assertLe(residualAssets, 1e6, "20-partial virtual residual stays below 1 USDC");
+
+        // Total fee should equal 10% of realised yield, within the same linear bound.
+        uint256 realisedYield = totalGross - deposit_;
+        assertApproxEqAbs(
+            totalFee, expectedFee(realisedYield), 40, "20-partial cumulative fee == 10% of realised yield"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

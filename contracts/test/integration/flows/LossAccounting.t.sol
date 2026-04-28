@@ -38,7 +38,7 @@ contract LossAccountingTest is Actions {
         assertEq(router.costBasisUSDC(aliceL), DEPOSIT, "Post-deposit costBasis == deposit");
 
         uint256 lossAmount = (DEPOSIT * LOSS_PCT) / 100; // $15k loss
-        uint256 postLossAssets = DEPOSIT - lossAmount;    // $35k remaining
+        uint256 postLossAssets = DEPOSIT - lossAmount; // $35k remaining
         aToken.setBalance(address(router), postLossAssets);
 
         // Verify loss is reflected
@@ -199,15 +199,22 @@ contract LossAccountingTest is Actions {
         assertGt(s.accruedYield, 0, "accruedYield > 0 (real profit above costBasis)");
 
         // Withdraw all
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 returned = userWithdraws(aliceL, shares);
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+        uint256 actualGross = returned + feeCollected;
+        uint256 actualYield = actualGross - DEPOSIT;
 
-        // Fee should be 10% of the yield above costBasis
+        // Fee should be 10% of realised yield above costBasis. The virtual
+        // offset retains a small slice of the recovered profit.
         uint256 grossExpected = 55_000e6;
         uint256 yieldExpected = grossExpected - DEPOSIT; // $5k
-        uint256 feeExpected = feeCollector.calculateFee(yieldExpected); // $500
+        uint256 residualBound = (yieldExpected * 1e6) / (DEPOSIT + 1e6) + 4;
 
-        assertApproxEqAbs(usdc.balanceOf(treasury), feeExpected, 2, "Fee only on profit above original costBasis");
-        assertApproxEqAbs(returned, grossExpected - feeExpected, 4, "Received gross minus fee");
+        assertLe(actualYield, yieldExpected, "Realised profit cannot exceed recovered profit");
+        assertGe(actualYield + residualBound, yieldExpected, "Profit residual is bounded by virtual share ownership");
+        assertEq(feeCollected, feeCollector.calculateFee(actualYield), "Fee only on realised profit above costBasis");
+        assertEq(returned, actualGross - feeCollected, "Received gross minus fee");
         assertEq(router.costBasisUSDC(aliceL), 0, "costBasis == 0");
     }
 

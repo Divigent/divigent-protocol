@@ -9,7 +9,7 @@ import {Actions} from "../helpers/Actions.sol";
 ///         distributes yield proportionally to share-weighted time-in-pool, charges
 ///         exactly 10% on each user's *realised* yield (not pool-wide yield), keeps
 ///         users isolated from each other's actions, never decreases pricePerShare,
-///         and reconciles all USDC flows so nothing leaks.
+///         and reconciles all USDC flows including the virtual-offset residual.
 ///
 ///         This is the "if any subtle accounting bug exists, this test catches it"
 ///         scenario — multi-actor + time + yield + fees in one continuous journey.
@@ -28,8 +28,8 @@ contract MultiUserYieldTest is Actions {
         uint256 aliceDeposit = 50_000e6;
         uint256 aliceShares = userDeposits(aliceJ, aliceDeposit);
 
-        // Sole depositor at zero pool state: 1 USDC → 1 dvUSDC, modulo virtual offset.
-        // With virtual offset and an empty pool, shares = amount * 1 / 1 = amount.
+        // Sole depositor at zero pool state: 1 USDC -> 1 dvUSDC.
+        // With virtual offset and an empty pool, shares = amount * offset / offset = amount.
         assertEq(aliceShares, aliceDeposit, "Phase1: first deposit should mint 1:1 shares");
         assertEq(router.pricePerShare(), 1e18, "Phase1: pricePerShare = 1.0 with sole depositor");
 
@@ -39,15 +39,14 @@ contract MultiUserYieldTest is Actions {
         uint256 phase2Yield = 1_000e6; // $1,000 of yield
         accrueAaveYield(phase2Yield);
 
-        // Alice is sole holder, so the entire yield boosts pricePerShare.
+        // Alice is the only real holder, so almost all yield boosts her position.
+        // The virtual offset retains a bounded residual for inflation resistance.
         uint256 ppsAfterPhase2 = router.pricePerShare();
         assertGt(ppsAfterPhase2, 1e18, "Phase2: pricePerShare must rise with yield");
 
-        // Alice's accrued yield (unrealised) should equal phase2Yield within rounding.
         WalletSnap memory aliceMid = snap(aliceJ);
-        assertApproxEqAbs(
-            aliceMid.accruedYield, phase2Yield, 1, "Phase2: Alice's accruedYield equals all yield (sole holder)"
-        );
+        assertLe(aliceMid.accruedYield, phase2Yield, "Phase2: Alice cannot accrue more than pool yield");
+        assertGe(aliceMid.accruedYield, phase2Yield - 1e6, "Phase2: virtual-offset residual must stay below 1 USDC");
 
         // ━━━ PHASE 3 — Bob deposits at the post-yield price ━━━━━━━━━━━━━━━━━━
 
@@ -76,6 +75,7 @@ contract MultiUserYieldTest is Actions {
 
         // Save state for later cross-checks.
         uint256 ppsBeforeAliceExit = router.pricePerShare();
+        uint256 alicePreviewNet = router.previewRedeem(aliceShares, aliceJ);
         WalletSnap memory bobBeforeAliceExit = snap(bobJ);
 
         // ━━━ PHASE 5 — Alice exits everything ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -90,6 +90,7 @@ contract MultiUserYieldTest is Actions {
 
         // Principal is fully recovered.
         assertGe(aliceReturned, aliceDeposit, "Phase5: Alice must recover at least her principal");
+        assertEq(aliceReturned, alicePreviewNet, "Phase5: Alice net exit must match preview");
 
         // Fee is exactly 10% of Alice's *realised* yield — not pool-wide yield.
         assertEq(aliceFeeCollected, expectedFee(aliceYield), "Phase5: Alice's fee == 10% of her realised yield");
@@ -106,8 +107,9 @@ contract MultiUserYieldTest is Actions {
         // Pool yield since Alice joined: phase2Yield + phase4Yield = 2_600e6.
         // Phase 2 yield is 100% Alice's (sole holder).
         // Phase 4 yield split: aliceShares / (aliceShares + bobShares) of 1_600e6.
-        uint256 expectedAliceYield_lower = phase2Yield + (phase4Yield * aliceShares) / (aliceShares + bobShares) - 2;
-        uint256 expectedAliceYield_upper = expectedAliceYield_lower + 4;
+        uint256 idealAliceYield = phase2Yield + (phase4Yield * aliceShares) / (aliceShares + bobShares);
+        uint256 expectedAliceYield_lower = idealAliceYield - 1e6;
+        uint256 expectedAliceYield_upper = idealAliceYield + 4;
         assertGe(aliceYield, expectedAliceYield_lower, "Phase5: Alice's yield >= proportional expectation");
         assertLe(aliceYield, expectedAliceYield_upper, "Phase5: Alice's yield <= proportional expectation + dust");
 
@@ -129,6 +131,7 @@ contract MultiUserYieldTest is Actions {
         fastForward(16 days);
         uint256 phase6Yield = 500e6;
         accrueAaveYield(phase6Yield);
+        uint256 bobPreviewNet = router.previewRedeem(bobShares, bobJ);
 
         // ━━━ PHASE 7 — Bob exits everything ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -140,6 +143,7 @@ contract MultiUserYieldTest is Actions {
         uint256 bobYield = bobGross - bobDeposit;
 
         assertGe(bobReturned, bobDeposit, "Phase7: Bob must recover at least his principal");
+        assertEq(bobReturned, bobPreviewNet, "Phase7: Bob net exit must match preview");
         assertEq(bobFeeCollected, expectedFee(bobYield), "Phase7: Bob's fee == 10% of his realised yield");
         assertEq(bobReturned, bobDeposit + (bobYield - bobFeeCollected), "Phase7: Bob's net = principal + 90% yield");
 
@@ -147,8 +151,9 @@ contract MultiUserYieldTest is Actions {
         //   Phase 4 (1_600e6, shared with Alice — Bob's slice):
         //     bobShares / (aliceShares + bobShares) of 1_600e6
         //   Phase 6 (500e6, Bob is sole holder).
-        uint256 expectedBobYield_lower = (phase4Yield * bobShares) / (aliceShares + bobShares) + phase6Yield - 2;
-        uint256 expectedBobYield_upper = expectedBobYield_lower + 4;
+        uint256 idealBobYield = (phase4Yield * bobShares) / (aliceShares + bobShares) + phase6Yield;
+        uint256 expectedBobYield_lower = idealBobYield - 1e6;
+        uint256 expectedBobYield_upper = idealBobYield + 4;
         assertGe(bobYield, expectedBobYield_lower, "Phase7: Bob's yield >= proportional expectation");
         assertLe(bobYield, expectedBobYield_upper, "Phase7: Bob's yield <= proportional expectation + dust");
 
@@ -157,32 +162,32 @@ contract MultiUserYieldTest is Actions {
         // After both exit, all dvUSDC is burned.
         assertEq(dvUsdc.totalSupply(), 0, "Final: all dvUSDC burned");
 
-        // Sum of everything that came IN (deposits + accrued yield) must equal sum of
-        // everything that went OUT (to users + to treasury), within accumulated rounding.
-        // 4 wei tolerance covers two withdraws each rounding down by up to 2 wei.
+        // Sum of everything that came IN (deposits + accrued yield) must equal
+        // user exits + treasury fees + the bounded virtual-offset residual.
         uint256 totalDeposited = aliceDeposit + bobDeposit;
         uint256 totalYield = phase2Yield + phase4Yield + phase6Yield;
         uint256 totalToUsers = aliceReturned + bobReturned;
         uint256 totalToTreas = aliceFeeCollected + bobFeeCollected;
+        uint256 residualAssets = router.totalVaultAssets();
 
         assertApproxEqAbs(
-            totalToUsers + totalToTreas,
+            totalToUsers + totalToTreas + residualAssets,
             totalDeposited + totalYield,
             4,
-            "Final: users + treasury == deposits + yield (within rounding)"
+            "Final: users + treasury + residual == deposits + yield"
         );
 
-        // Treasury collected ~10% of total yield in aggregate (sum of per-user fees).
-        // Per-user fee is exact, so the aggregate is exact too — the only fuzz comes
-        // from each user's yield being computed against their realised gross, which
-        // can differ by <= 1 wei from the share-weighted ideal.
-        assertApproxEqAbs(totalToTreas, totalYield / 10, 4, "Final: treasury accumulated ~10% of total yield");
+        uint256 totalRealisedYield = aliceYield + bobYield;
+        assertLe(totalRealisedYield, totalYield, "Final: realised yield cannot exceed accrued yield");
+        assertLe(totalYield - totalRealisedYield, 1e6, "Final: virtual-offset residual yield < 1 USDC");
+        assertEq(
+            totalToTreas,
+            expectedFee(aliceYield) + expectedFee(bobYield),
+            "Final: treasury equals sum of realised-yield fees"
+        );
 
-        // The router should hold zero USDC and approximately zero aTokens.
-        // Any residual aToken dust comes from share-math floor rounding favouring the pool.
+        // The router should hold zero USDC and only the bounded virtual residual.
         assertEq(usdc.balanceOf(address(router)), 0, "Final: router holds no USDC (INV-4)");
-        assertLe(
-            aToken.balanceOf(address(router)), 4, "Final: router holds at most a few wei of aTokens (rounding dust)"
-        );
+        assertLe(aToken.balanceOf(address(router)), 1e6, "Final: virtual residual stays below 1 USDC");
     }
 }

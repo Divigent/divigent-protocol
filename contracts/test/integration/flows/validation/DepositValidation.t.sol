@@ -143,11 +143,10 @@ contract DepositValidationTest is Actions {
 
     function test_deposit_revertsWith_ZeroAmount_whenShareMathRoundsToZero() public {
         // Precondition for `dvUsdcMinted == 0`:
-        //   amount * (totalSupply + 1) < (totalAssets + 1)   [virtual-offset floor]
-        // With amount = MIN_DEPOSIT = 10e6 and a small totalSupply, this needs
-        // totalAssets > amount * (totalSupply + 1) ≈ 1e14, i.e. ~$100M of donated
-        // aTokens. That exceeds the day-0 TVL cap (500k), so warp past day 91
-        // to remove the cap, then build the pathological state.
+        //   amount * (totalSupply + offset) < (totalAssets + offset)
+        // With the larger virtual offset this requires an extreme donated
+        // balance, so warp past day 91 to remove the cap before building the
+        // mechanical zero-share validation state.
 
         fastForward(92 days);
         assertEq(router.currentTVLCap(), type(uint256).max, "cap removed post day-91");
@@ -158,7 +157,6 @@ contract DepositValidationTest is Actions {
         userDeposits(seedUser, router.MIN_DEPOSIT());
 
         // Inflate aToken balance enough to collapse share math to zero.
-        // 1B USDC of aTokens >> amount * (totalSupply + 1).
         aToken.mint(address(router), 1_000_000_000e6);
 
         // Fresh victim attempts MIN_DEPOSIT. Cache the value so `vm.expectRevert`

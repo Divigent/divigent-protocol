@@ -157,7 +157,8 @@ contract ForkCapacityBoundaryTest is ForkBase {
         uint256 aaveIdle = usdc.balanceOf(BASE_AAVE_ATOKEN_USDC);
         uint256 totalHeld = aaveBefore + morphoAssets;
         uint256 totalSupply = dvUsdc.totalSupply();
-        uint256 grossEstimate = (shares * (totalHeld + 1)) / (totalSupply + 1);
+        uint256 virtualOffset = 1e6;
+        uint256 grossEstimate = (shares * (totalHeld + virtualOffset)) / (totalSupply + virtualOffset);
 
         uint256 aaveCap = aaveBefore < aaveIdle ? aaveBefore : aaveIdle;
         uint256 morphoCap = liveMaxWithdraw > morphoAssets ? morphoAssets : liveMaxWithdraw;
