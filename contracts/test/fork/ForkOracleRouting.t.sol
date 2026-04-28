@@ -45,21 +45,20 @@ contract ForkOracleRoutingTest is ForkBase {
     ///         share-price delta — the exact formula the oracle uses
     ///         internally. Previously this test only asserted `< 100% APY`.
     function testFork_oracle_morphoSpotRate_matchesManualFormula() public {
-        uint256 price1 = morphoVault.convertToAssets(1e18);
+        uint256 probe = oracle.SHARE_UNIT();
+        uint256 price1 = morphoVault.convertToAssets(probe);
         oracle.recordObservation();
 
         vm.warp(block.timestamp + 10 minutes);
 
-        uint256 price2 = morphoVault.convertToAssets(1e18);
+        uint256 price2 = morphoVault.convertToAssets(probe);
         oracle.recordObservation();
 
         uint256 oracleRate = oracle.morphoSpotRate();
 
         if (price2 > price1) {
-            // Oracle formula: rate = (price2 - price1) * 1e27 / price1 *
-            //                         (365.25 days / elapsed)
-            // elapsed here is 600 seconds.
-            uint256 expected = ((price2 - price1) * 1e27 / price1) * (365.25 days) / 10 minutes;
+            // Oracle formula, with elapsed fixed at 600 seconds here.
+            uint256 expected = (price2 - price1) * oracle.SECONDS_PER_YEAR() * oracle.RAY() / price1 / 10 minutes;
             assertApproxEqAbs(oracleRate, expected, 1, "morpho rate matches manual annualised interval rate");
         } else {
             // No share-price growth → oracle rate stays zero.

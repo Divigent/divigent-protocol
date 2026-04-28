@@ -37,7 +37,7 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///
 ///         Vault safety (oracle advisory):
 ///         - Aave: utilisation check via available USDC vs. total aToken supply (<90%).
-///         - Morpho: share price peg check (convertToAssets(1e18) >= 1e6 — no underwater).
+///         - Morpho: share price peg check (sampled share price at or above peg).
 ///         - The oracle provides an advisory signal. VaultRouter enforces amount-aware
 ///           capacity checks via _canAllocate() before routing any deposit.
 ///
@@ -83,10 +83,15 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///         0.50% × 1e27 (expressed in ray terms for comparison with TWAR rates).
     uint256 public constant MIN_DIFFERENTIAL_RAY = 5e24; // 0.5% in ray
 
-    /// @notice Unit share quantity used for Morpho share-price queries.
-    ///         MetaMorpho vaults use 18-decimal shares (standard ERC-4626).
-    ///         convertToAssets(SHARE_UNIT) returns the USDC value of 1 full share.
-    uint256 public constant SHARE_UNIT = 1e18;
+    /// @notice Morpho share amount used for share-price sampling.
+    /// @dev Uses a larger probe size to reduce USDC 6-decimal quantization in
+    ///      per-interval rate calculations.
+    uint256 public constant SHARE_UNIT = 1e24;
+
+    /// @dev One full share is 1e18 shares and 1 USDC is 1e6 assets, so
+    ///      convertToAssets(SHARE_UNIT) should be at least SHARE_UNIT * 1e6 / 1e18.
+    ///      At SHARE_UNIT = 1e24, this evaluates to 1e12.
+    uint256 public constant MORPHO_PEG_ASSETS = SHARE_UNIT / 1e12;
 
     /// @notice Maximum age of the last observation before the oracle is considered stale.
     ///         VaultRouter rejects deposits when isFresh() returns false.
@@ -114,7 +119,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///      because only the *difference* between two checkpoints is used (like Uniswap V2).
     struct Checkpoint {
         uint32  timestamp;
-        uint64  morphoSharePrice;  // convertToAssets(1e18) = USDC value of 1 share, 6 dec
+        uint64  morphoSharePrice;  // convertToAssets(SHARE_UNIT), sampled USDC assets
         uint224 aaveCumulative;    // Σ aaveRate × Δt (in RAY·seconds), truncated
         uint224 morphoCumulative;  // Σ morphoRate × Δt (in RAY·seconds), truncated
     }
@@ -460,7 +465,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///        risk parameters. Safe if computed utilisation < 90% at query time.
     ///
     ///      Morpho share-price peg (heuristic):
-    ///        Safe if convertToAssets(1 share) >= 1 USDC — i.e., the vault has
+    ///        Safe if convertToAssets(SHARE_UNIT) is at or above par — i.e., the vault has
     ///        not gone underwater. This is a narrow bad-debt/peg check, not a liquidity
     ///        or market-stress check. A healthy share price does not guarantee the vault
     ///        can service a large redemption without delay or slippage.
@@ -480,11 +485,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
             return available >= minAvailable;
         } else {
-            // Morpho MetaMorpho vault (18-decimal shares, 6-decimal USDC)
-            // Share price peg check: 1 full share (1e18) should be worth at least
-            // 1 USDC (1e6). If not, the vault has gone underwater (bad debt).
+            // Morpho MetaMorpho vault (18-decimal shares, 6-decimal USDC).
+            // The peg threshold is scaled to the oracle's probe size.
             uint256 sharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
-            return sharePrice >= 1e6;
+            return sharePrice >= MORPHO_PEG_ASSETS;
         }
     }
 }

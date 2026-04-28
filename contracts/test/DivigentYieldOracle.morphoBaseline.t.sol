@@ -13,11 +13,11 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
 
         _recordAtSharePrice(1_040_000);
         assertEq(yieldOracle.morphoSpotRate(), 0, "drop should not produce a Morpho rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "drop should not lower baseline");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "drop should not lower baseline");
 
         _recordAtSharePrice(1_050_000);
         assertEq(yieldOracle.morphoSpotRate(), 0, "recovery to baseline should not produce a Morpho rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "baseline should stay at prior high");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "baseline should stay at prior high");
     }
 
     function test_morphoBaseline_newHighUsesPriorHighNotDroppedPrice() public {
@@ -28,12 +28,14 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
 
         _recordAtSharePrice(1_060_000);
 
-        uint256 expectedFromPriorHigh = _expectedMorphoRate(1_050_000, 1_060_000, elapsed);
-        uint256 inflatedFromDrop = _expectedMorphoRate(1_040_000, 1_060_000, elapsed);
+        uint256 expectedFromPriorHigh =
+            _expectedMorphoRate(_sampledSharePrice(1_050_000), _sampledSharePrice(1_060_000), elapsed);
+        uint256 inflatedFromDrop =
+            _expectedMorphoRate(_sampledSharePrice(1_040_000), _sampledSharePrice(1_060_000), elapsed);
 
         assertEq(yieldOracle.morphoSpotRate(), expectedFromPriorHigh, "rate should use prior high baseline");
         assertLt(yieldOracle.morphoSpotRate(), inflatedFromDrop, "rate should not use lowered baseline");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_060_000, "new high should advance baseline");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_060_000), "new high should advance baseline");
     }
 
     function test_morphoBaseline_multipleDropsPreservePriorHigh() public {
@@ -41,15 +43,15 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
 
         _recordAtSharePrice(1_040_000);
         assertEq(yieldOracle.morphoSpotRate(), 0, "first drop should produce zero rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "first drop should preserve baseline");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "first drop should preserve baseline");
 
         _recordAtSharePrice(1_030_000);
         assertEq(yieldOracle.morphoSpotRate(), 0, "second drop should produce zero rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "second drop should preserve baseline");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "second drop should preserve baseline");
 
         _recordAtSharePrice(1_020_000);
         assertEq(yieldOracle.morphoSpotRate(), 0, "third drop should produce zero rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "third drop should preserve baseline");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "third drop should preserve baseline");
     }
 
     function test_morphoBaseline_flatAtBaselineDoesNotAdvanceOrSpike() public {
@@ -58,7 +60,7 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
         _recordAtSharePrice(1_050_000);
 
         assertEq(yieldOracle.morphoSpotRate(), 0, "flat baseline should produce zero rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "flat baseline should remain unchanged");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(1_050_000), "flat baseline should remain unchanged");
     }
 
     function test_morphoBaseline_recoveryBoundaryIsStrictGreater() public {
@@ -68,7 +70,11 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
         _recordAtSharePrice(1_050_000);
 
         assertEq(yieldOracle.morphoSpotRate(), 0, "equal-to-baseline recovery should produce zero rate");
-        assertEq(yieldOracle.lastMorphoSharePrice(), 1_050_000, "equal-to-baseline recovery should not advance");
+        assertEq(
+            yieldOracle.lastMorphoSharePrice(),
+            _sampledSharePrice(1_050_000),
+            "equal-to-baseline recovery should not advance"
+        );
     }
 
     function test_morphoBaseline_zeroBaselineInitializesWithoutRate() public {
@@ -82,12 +88,16 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
         freshOracle.recordObservation();
 
         assertEq(freshOracle.morphoSpotRate(), 0, "zero baseline should initialize without a rate");
-        assertEq(freshOracle.lastMorphoSharePrice(), 1_000_000, "zero baseline should initialize to current price");
+        assertEq(
+            freshOracle.lastMorphoSharePrice(),
+            _sampledSharePriceFor(freshOracle, 1_000_000),
+            "zero baseline should initialize to current price"
+        );
     }
 
     function _seedBaseline(uint256 sharePrice) internal {
         _recordAtSharePrice(sharePrice);
-        assertEq(yieldOracle.lastMorphoSharePrice(), sharePrice, "baseline seed mismatch");
+        assertEq(yieldOracle.lastMorphoSharePrice(), _sampledSharePrice(sharePrice), "baseline seed mismatch");
     }
 
     function _recordAtSharePrice(uint256 sharePrice) internal {
@@ -102,5 +112,13 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
         returns (uint256)
     {
         return (currentPrice - lastPrice) * yieldOracle.SECONDS_PER_YEAR() * yieldOracle.RAY() / lastPrice / elapsed;
+    }
+
+    function _sampledSharePrice(uint256 sharePrice) internal view returns (uint256) {
+        return _sampledSharePriceFor(yieldOracle, sharePrice);
+    }
+
+    function _sampledSharePriceFor(DivigentYieldOracle oracle, uint256 sharePrice) internal view returns (uint256) {
+        return sharePrice * oracle.SHARE_UNIT() / 1e18;
     }
 }
