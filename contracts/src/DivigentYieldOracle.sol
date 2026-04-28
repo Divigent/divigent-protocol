@@ -31,9 +31,9 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///           at least MIN_OBSERVATION_INTERVAL seconds. Using a single snapshot and
 ///           comparing to a fixed base would confuse total accrued yield with
 ///           the period rate, producing wildly inaccurate annualised figures.
-///         - `_lastMorphoSharePrice` is stored in state and updated on each observation.
-///         - intervalRate = (currentPrice - lastPrice) / lastPrice * (SECONDS_PER_YEAR / elapsed)
-///         - This gives a true annualised rate for the observed interval, in ray.
+///         - `lastMorphoSharePrice` stores the baseline for positive price movement.
+///         - intervalRate = (currentPrice - baseline) / baseline * (SECONDS_PER_YEAR / elapsed)
+///         - Flat or downward observations keep the prior baseline and produce a zero Morpho rate.
 ///
 ///         Vault safety (oracle advisory):
 ///         - Aave: utilisation check via available USDC vs. total aToken supply (<90%).
@@ -138,8 +138,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice The vault type that was optimal at the last observation.
     VaultType public lastOptimalVaultType;
 
-    /// @notice Morpho share price recorded at the most recent observation.
-    ///         Used as the prior snapshot for computing the next interval rate.
+    /// @notice Morpho share-price baseline used for the next positive-rate interval.
+    ///         Preserved across flat or downward observations.
+    ///         Advances only on strict positive share-price movement.
     ///         Initialised in the constructor with the vault's current share price.
     uint256 public lastMorphoSharePrice;
 
@@ -287,22 +288,25 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // with the current period rate, producing wildly inaccurate annualised figures.
         uint256 currentSharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
         uint256 newMorphoRate     = 0;
+        uint256 morphoBaseline    = lastMorphoSharePrice;
 
-        if (
-            lastMorphoSharePrice > 0
-            && currentSharePrice > lastMorphoSharePrice
+        if (morphoBaseline == 0) {
+            morphoBaseline = currentSharePrice;
+        } else if (
+            currentSharePrice > morphoBaseline
             && elapsed > 0
         ) {
             // Annualised rate in ray:
-            // rate = (priceDelta / lastPrice) * (SECONDS_PER_YEAR / elapsed) * RAY
-            newMorphoRate = (currentSharePrice - lastMorphoSharePrice)
+            // rate = (priceDelta / baseline) * (SECONDS_PER_YEAR / elapsed) * RAY
+            newMorphoRate = (currentSharePrice - morphoBaseline)
                 * SECONDS_PER_YEAR
                 * RAY
-                / lastMorphoSharePrice
+                / morphoBaseline
                 / elapsed;
+            morphoBaseline = currentSharePrice;
         }
-        // If share price hasn't moved or decreased (yield reversal is not possible in
-        // MetaMorpho but may appear due to rounding), rate remains 0 for this interval.
+        // Flat or downward observations keep the prior baseline. Recoveries back
+        // to that baseline are not counted as positive yield.
 
         // ── Step 4: Store checkpoint in circular buffer ───────────────────────
         _checkpoints[_head % BUFFER_SIZE] = Checkpoint({
@@ -322,7 +326,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         // ── Step 5: Update state variables ────────────────────────────────────
         aaveSpotRate         = newAaveRate;
         morphoSpotRate       = newMorphoRate;
-        lastMorphoSharePrice = currentSharePrice;
+        lastMorphoSharePrice = morphoBaseline;
         lastObservationTime  = block.timestamp;
 
         emit ObservationRecorded(block.timestamp, newAaveRate, newMorphoRate);
