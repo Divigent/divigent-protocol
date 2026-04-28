@@ -62,6 +62,11 @@ interface IDivigentVaultRouter {
     /// @notice Emitted when deposit pause state changes.
     event DepositsPaused(bool paused);
 
+    /// @notice Emitted when the emergency multisig adjusts the gas stipend
+    ///         forwarded to `MORPHO_VAULT.convertToAssets` inside the
+    ///         router's withdraw-planning helper.
+    event MorphoViewGasUpdated(uint256 oldGas, uint256 newGas);
+
     /// @notice Emitted when a withdrawal's proportional split was rebalanced
     ///         because one vault's effective capacity was below its target slice.
     ///         `shortLeg` identifies which vault was short: true = Morpho short,
@@ -131,6 +136,13 @@ interface IDivigentVaultRouter {
     ///         next withdraw for a Morpho-touching wallet will revert with
     ///         this error.
     error MorphoUnreachable();
+
+    /// @notice Reverts when the proposed Morpho view-call gas stipend is
+    ///         outside `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`.
+    /// @param  provided The proposed gas value.
+    /// @param  min      The protocol-enforced lower bound (inclusive).
+    /// @param  max      The protocol-enforced upper bound (inclusive).
+    error MorphoViewGasOutOfBounds(uint256 provided, uint256 min, uint256 max);
 
     // ── Authorisation ─────────────────────────────────────────────────────────
 
@@ -279,10 +291,9 @@ interface IDivigentVaultRouter {
     /// @notice Safe pre-flight view for withdraw planning. Returns the
     ///         router's current exit capacity decomposed per vault.
     ///
-    ///         Never reverts. If Morpho's view path is failing (vault
-    ///         upgrade, compromised allocator, gas-bomb), the call still
-    ///         returns with `morphoReachable = false` and Morpho fields
-    ///         zeroed. Callers can compare `totalWithdrawCap` against a
+    ///         Never reverts. If Morpho's view path is unavailable, the
+    ///         call still returns with `morphoReachable = false` and Morpho
+    ///         fields zeroed. Callers can compare `totalWithdrawCap` against a
     ///         desired gross and decide whether to submit the withdraw
     ///         tx — avoiding wasted gas on a predictable revert.
     ///
@@ -315,6 +326,14 @@ interface IDivigentVaultRouter {
     /// @notice Resumes deposits after a pause.
     ///         Only callable by the immutable emergency multisig.
     function unpauseDeposits() external;
+
+    /// @notice Update the gas stipend forwarded to Morpho's `convertToAssets`
+    ///         view inside the router's withdraw-planning helper. Bounded by
+    ///         `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`. Reverts with
+    ///         `MorphoViewGasOutOfBounds` outside that range. Only callable
+    ///         by the immutable emergency multisig.
+    /// @param newGas The new gas stipend (inclusive of bounds).
+    function setMorphoViewGas(uint256 newGas) external;
 
     // ── Emergency Treasury Rotation (multisig only, timelocked) ───────────────
 

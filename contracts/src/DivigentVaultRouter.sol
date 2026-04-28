@@ -113,8 +113,13 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     bytes32 private constant INITIALIZE_FOR_TYPEHASH =
         keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
 
-    /// @dev Gas limit on Morpho view calls inside the capacity helper.
-    uint256 private constant MORPHO_VIEW_GAS = 100_000;
+    /// @notice Minimum gas stipend for Morpho view calls in withdraw planning.
+    /// @dev Set above the measured cold-path cost of `convertToAssets` on Base.
+    uint256 public constant MIN_MORPHO_VIEW_GAS = 350_000;
+
+    /// @notice Maximum gas stipend for Morpho view calls in withdraw planning.
+    /// @dev Caps gas forwarded to the external view call.
+    uint256 public constant MAX_MORPHO_VIEW_GAS = 1_000_000;
 
     // ── Immutables ────────────────────────────────────────────────────────────
 
@@ -171,6 +176,12 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///         WalletAlreadyAuthorised() guard that fires afterward.
     mapping(address => uint256) public nonces;
 
+    /// @notice Gas stipend forwarded to `MORPHO_VAULT.convertToAssets`
+    ///         inside `_planWithdrawCapacity`. Initialised to
+    ///         `MIN_MORPHO_VIEW_GAS` and adjustable by the emergency
+    ///         multisig within `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`.
+    uint256 public morphoViewGas;
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param usdc              USDC address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 on Base).
@@ -211,6 +222,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         DV_USDC            = DvUSDC(dvUsdc);
         EMERGENCY_MULTISIG = emergencyMultisig;
         DEPLOYMENT_TIME    = block.timestamp;
+
+        // Initialise the Morpho view-call gas stipend at the lower bound.
+        morphoViewGas = MIN_MORPHO_VIEW_GAS;
 
         // Pre-approve Aave and Morpho to spend USDC held transiently in this contract.
         // These approvals are max so repeated deposits don't incur extra approve txs.
@@ -462,8 +476,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // ── Execute: pull from each vault ────────────────────────────────────
         // We intentionally DO NOT wrap the mutating Morpho call in try/catch.
         // If Morpho's view said it could serve `fromMorpho` but the mutating
-        // call reverts (intra-block state change, liquidity race, or a hostile
-        // vault implementation reentering), the revert propagates.
+        // call reverts (intra-block state change, liquidity race, or unexpected
+        // vault behaviour), the revert propagates.
         // The reentrancy guard relies on this bubble-up, and plan/execute
         // capacity drift is rare enough that a simple retry is acceptable.
         if (fromAave > 0) {
@@ -485,10 +499,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // already in the router is excluded from yield and fee calculation.
         uint256 actualGross  = USDC.balanceOf(address(this)) - balanceBefore;
 
-        // Guard: if vault redemptions silently returned 0 (protocol bug, not a
-        // revert), stop here rather than burning dvUSDC for nothing. See
-        // test/SilentFailure.t.sol for the proof that this is exploitable without
-        // this check.
+        // Guard: if vault redemptions silently returned 0 without reverting,
+        // stop here rather than burning dvUSDC for nothing.
         if (actualGross == 0) revert InsufficientVaultLiquidity(grossUSDC, 0);
 
         // Recompute yield from actual gross; floor at 0 — principal is never negative yield
@@ -675,10 +687,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     /// @dev Degrades gracefully when Morpho's view path is unreachable
-    ///      (revert or gas bomb). Routes through `_planWithdrawCapacity()`
-    ///      so the same 100k-gas try/catch that guards `withdraw()` also
+    ///      (revert or bounded-gas failure). Routes through `_planWithdrawCapacity()`
+    ///      so the same bounded-gas try/catch that guards `withdraw()` also
     ///      guards this informational view — external integrators can call
-    ///      this without risk of OOG'ing on a compromised Morpho vault.
+    ///      this without exposing the caller to an unbounded Morpho view.
     ///      Callers that need to distinguish "0 Morpho holdings" from
     ///      "Morpho unreachable" should read `withdrawCapacity()` which
     ///      exposes the `morphoReachable` flag.
@@ -737,6 +749,24 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     function unpauseDeposits() external override onlyEmergencyMultisig {
         depositsPaused = false;
         emit DepositsPaused(false);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function setMorphoViewGas(uint256 newGas)
+        external
+        override
+        onlyEmergencyMultisig
+    {
+        if (newGas < MIN_MORPHO_VIEW_GAS || newGas > MAX_MORPHO_VIEW_GAS) {
+            revert MorphoViewGasOutOfBounds(
+                newGas,
+                MIN_MORPHO_VIEW_GAS,
+                MAX_MORPHO_VIEW_GAS
+            );
+        }
+        uint256 oldGas = morphoViewGas;
+        morphoViewGas = newGas;
+        emit MorphoViewGasUpdated(oldGas, newGas);
     }
 
     // ── Emergency Treasury Rotation ──────────────────────────────────────────
@@ -978,7 +1008,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             // No exposure — vacuously reachable.
             cap.morphoReachable = true;
         } else {
-            try MORPHO_VAULT.convertToAssets{gas: MORPHO_VIEW_GAS}(morphoShares)
+            try MORPHO_VAULT.convertToAssets{gas: morphoViewGas}(morphoShares)
                 returns (uint256 assets)
             {
                 cap.morphoAssetsHeld = assets;
