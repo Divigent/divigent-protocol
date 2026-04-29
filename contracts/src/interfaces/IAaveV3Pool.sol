@@ -53,6 +53,10 @@ interface IAaveV3Pool {
     /// @notice Returns the normalised income of the reserve (liquidity index), in ray (1e27).
     function getReserveNormalizedIncome(address asset) external view returns (uint256);
 
+    /// @notice Returns the reserve configuration bitmap for `asset`.
+    /// @dev Aave returns DataTypes.ReserveConfigurationMap, which ABI-encodes as its single uint256 `data` field.
+    function getConfiguration(address asset) external view returns (uint256 configuration);
+
     /// @notice Returns the aToken, stableDebtToken and variableDebtToken addresses for `asset`.
     function getReserveData(address asset)
         external

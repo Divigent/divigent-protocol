@@ -121,6 +121,11 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     /// @dev Caps gas forwarded to the external view call.
     uint256 public constant MAX_MORPHO_VIEW_GAS = 1_000_000;
 
+    /// @dev Aave V3 ReserveConfigurationMap bit positions for active/frozen/paused.
+    uint256 private constant AAVE_CONFIG_ACTIVE_BIT = 56;
+    uint256 private constant AAVE_CONFIG_FROZEN_BIT = 57;
+    uint256 private constant AAVE_CONFIG_PAUSED_BIT = 60;
+
     // ── Immutables ────────────────────────────────────────────────────────────
 
     /// @notice USDC token on Base mainnet (6 decimals).
@@ -888,6 +893,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         uint256 amount
     ) internal view returns (bool) {
         if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
+            if (!_isAaveSupplyEnabled()) return false;
             return USDC.balanceOf(address(A_TOKEN)) >= amount;
         } else {
             // ROUTING-SAFE: a Morpho view revert (pause, unexpected state) is
@@ -900,6 +906,32 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
                 return false;
             }
         }
+    }
+
+    // ── Internal: Aave Reserve Health ──────────────────────────────────────────
+
+    /// @dev Reads Aave V3 reserve flags for USDC. If the pool view reverts,
+    ///      treat Aave as unavailable so deposits/withdrawals can route elsewhere.
+    function _readAaveConfig() internal view returns (bool active, bool frozen, bool paused) {
+        try AAVE_POOL.getConfiguration(address(USDC)) returns (uint256 configuration) {
+            active = ((configuration >> AAVE_CONFIG_ACTIVE_BIT) & 1) == 1;
+            frozen = ((configuration >> AAVE_CONFIG_FROZEN_BIT) & 1) == 1;
+            paused = ((configuration >> AAVE_CONFIG_PAUSED_BIT) & 1) == 1;
+        } catch {
+            active = false;
+            frozen = false;
+            paused = false;
+        }
+    }
+
+    function _isAaveSupplyEnabled() internal view returns (bool) {
+        (bool active, bool frozen, bool paused) = _readAaveConfig();
+        return active && !frozen && !paused;
+    }
+
+    function _isAaveWithdrawEnabled() internal view returns (bool) {
+        (bool active, , bool paused) = _readAaveConfig();
+        return active && !paused;
     }
 
     // ── Internal: Deposit Logic ───────────────────────────────────────────────
@@ -1031,9 +1063,11 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         cap.aaveAssetsHeld    = A_TOKEN.balanceOf(address(this));
         cap.aaveIdleLiquidity = USDC.balanceOf(address(A_TOKEN));
-        cap.aaveWithdrawCap   = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
-            ? cap.aaveAssetsHeld
-            : cap.aaveIdleLiquidity;
+        if (_isAaveWithdrawEnabled()) {
+            cap.aaveWithdrawCap = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
+                ? cap.aaveAssetsHeld
+                : cap.aaveIdleLiquidity;
+        }
 
         uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
         if (morphoShares == 0) {
