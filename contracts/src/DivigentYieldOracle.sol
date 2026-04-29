@@ -38,8 +38,8 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///         Vault safety (oracle advisory):
 ///         - Aave: utilisation check via available USDC vs. total aToken supply (<90%).
 ///         - Morpho: share price peg check (sampled share price at or above peg).
-///         - The oracle provides an advisory signal. VaultRouter enforces amount-aware
-///           capacity checks via _canAllocate() before routing any deposit.
+///         - getOptimalVault() excludes unsafe vaults from deposit routing.
+///           VaultRouter then enforces amount-aware capacity checks via _canAllocate().
 ///
 ///         Oracle freshness:
 ///         - MAX_STALENESS = 2 hours. If no observation has been recorded within 2 hours,
@@ -158,6 +158,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     error ZeroUsdc();
     error ZeroMorphoVault();
 
+    /// @notice Reverts when neither supported vault passes the oracle safety check.
+    error NoSafeVault();
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param aavePool    Aave V3 Pool address on Base.
@@ -202,18 +205,21 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     {
         (uint256 aaveTWAR, uint256 morphoTWAR) = _computeTWAR();
 
+        bool aaveSafe   = _isVaultSafe(VaultType.AAVE);
         bool morphoSafe = _isVaultSafe(VaultType.MORPHO);
+
+        if (!aaveSafe && !morphoSafe) revert NoSafeVault();
 
         // Morpho wins only if: safe AND its TWAR exceeds Aave's by MIN_DIFFERENTIAL_RAY
         bool morphoWins = morphoSafe
             && (morphoTWAR > aaveTWAR)
             && (morphoTWAR - aaveTWAR >= MIN_DIFFERENTIAL_RAY);
 
-        if (morphoWins) {
+        if (morphoWins || !aaveSafe) {
             return (address(MORPHO_VAULT), VaultType.MORPHO, morphoTWAR);
         }
 
-        // Fallback: Aave V3 (deepest liquidity, lowest counterparty risk).
+        // Fallback: Aave V3 only while it passes its own safety check.
         // VaultRouter performs its own _canAllocate() check and can revert
         // with NoSafeRoute if neither vault can accommodate the deposit amount.
         return (address(AAVE_POOL), VaultType.AAVE, aaveTWAR);

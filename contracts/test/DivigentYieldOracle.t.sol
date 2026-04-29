@@ -659,21 +659,18 @@ contract DivigentYieldOracleTest is TestBase {
     // NEW: getOptimalVault edge cases
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function test_getOptimalVault_returnsAaveEvenWhenBothVaultsUnsafe() public {
+    function test_getOptimalVault_revertsWhenBothVaultsUnsafe() public {
         // Aave at >90% utilization (unsafe per oracle heuristic)
         _setAaveUtilization(100e6, 5e6); // only 5% available
         // Morpho share price below 1 USDC (unsafe)
         morphoVault.setSharePrice(999_999);
 
-        (address vault, IDivigentYieldOracle.VaultType vaultType,) = yieldOracle.getOptimalVault();
-
-        // Oracle returns Aave even though its own _isVaultSafe(AAVE) = false
-        assertEq(vault, address(aavePool), "Both unsafe: oracle still returns Aave");
-        assertEq(uint256(vaultType), uint256(IDivigentYieldOracle.VaultType.AAVE));
-
         // Prove Aave IS unsafe by the oracle's own standard
         assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE), "Aave should be unsafe");
         assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Morpho should be unsafe");
+
+        vm.expectRevert(DivigentYieldOracle.NoSafeVault.selector);
+        yieldOracle.getOptimalVault();
     }
 
     function test_getOptimalVault_morphoDifferentialExactlyAtThreshold() public {
