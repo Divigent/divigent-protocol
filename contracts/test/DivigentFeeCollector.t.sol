@@ -51,12 +51,12 @@ contract DivigentFeeCollectorTest is Test {
         assertEq(collector.calculateFee(0), 0);
     }
 
-    function test_calculateFee_roundsDownToNearestMicroUsdc() public view {
-        // 1 wei yield → 1000/10000 = 0
-        assertEq(collector.calculateFee(1), 0);
-        // 9 → still 0
-        assertEq(collector.calculateFee(9), 0);
-        // 10 → 10000/10000 = 1
+    function test_calculateFee_roundsUpToNearestMicroUsdc() public view {
+        // 1 wei yield → ceil(1000/10000) = 1
+        assertEq(collector.calculateFee(1), 1);
+        // 9 → still rounds up to 1
+        assertEq(collector.calculateFee(9), 1);
+        // 10 → ceil(10000/10000) = 1
         assertEq(collector.calculateFee(10), 1);
     }
 
@@ -65,16 +65,18 @@ contract DivigentFeeCollectorTest is Test {
         assertEq(collector.calculateFee(1_000_000), 100_000);
     }
 
-    function testFuzz_calculateFee_neverExceedsTenPercent(uint128 yieldRaw) public view {
+    function testFuzz_calculateFee_neverExceedsCeilTenPercent(uint128 yieldRaw) public view {
         uint256 y = uint256(yieldRaw);
         uint256 fee = collector.calculateFee(y);
-        assertLe(fee * collector.BPS_DENOMINATOR(), y * collector.FEE_BPS());
+        uint256 maxCeilProduct = y * collector.FEE_BPS() + collector.BPS_DENOMINATOR() - 1;
+        assertLe(fee * collector.BPS_DENOMINATOR(), maxCeilProduct);
         assertLe(fee, y);
     }
 
-    function testFuzz_calculateFee_matchesFloorProduct(uint128 yieldRaw) public view {
+    function testFuzz_calculateFee_matchesCeilProduct(uint128 yieldRaw) public view {
         uint256 y = uint256(yieldRaw);
-        uint256 expected = (y * collector.FEE_BPS()) / collector.BPS_DENOMINATOR();
+        uint256 expected =
+            (y * collector.FEE_BPS() + collector.BPS_DENOMINATOR() - 1) / collector.BPS_DENOMINATOR();
         assertEq(collector.calculateFee(y), expected);
     }
 
@@ -96,13 +98,16 @@ contract DivigentFeeCollectorTest is Test {
         assertEq(usdc.balanceOf(address(this)), 0);
     }
 
-    // ── collectFee yield > 0 but fee floors to 0 ──────────────────────────────
+    // ── collectFee yield > 0 with fee rounded up ─────────────────────────────
 
-    function test_collectFee_positiveYieldButFlooredFee_returnsZeroWithoutTransfer() public {
-        // yield 5 → fee = 5000/10000 = 0
+    function test_collectFee_positiveYieldRoundsUpAndTransfers() public {
+        // yield 5 → ceil(5000/10000) = 1
+        usdc.mint(address(this), 1);
+        usdc.approve(address(collector), type(uint256).max);
+
         uint256 fee = collector.collectFee(wallet, 5);
-        assertEq(fee, 0);
-        assertEq(usdc.balanceOf(treasury), 0);
+        assertEq(fee, 1);
+        assertEq(usdc.balanceOf(treasury), 1);
     }
 
     // ── collectFee happy path ─────────────────────────────────────────────────
@@ -175,9 +180,8 @@ contract DivigentFeeCollectorTest is Test {
     function test_calculateFee_maxUint128_doesNotOverflow() public view {
         uint256 maxYield = type(uint128).max;
         uint256 fee = collector.calculateFee(maxYield);
-        // FEE_BPS = 1000, BPS_DENOMINATOR = 10000
-        // fee = maxYield * 1000 / 10000 = maxYield / 10
-        assertEq(fee, maxYield / 10, "Max uint128 yield should compute without overflow");
+        uint256 expected = (maxYield + 9) / 10;
+        assertEq(fee, expected, "Max uint128 yield should compute without overflow");
         assertLe(fee, maxYield, "Fee should never exceed yield");
     }
 
@@ -226,12 +230,16 @@ contract DivigentFeeCollectorTest is Test {
         assertEq(logs.length, 0, "No event should be emitted for zero yield");
     }
 
-    function test_collectFee_doesNotEmitEventWhenFeeFloorsToZero() public {
+    function test_collectFee_emitsEventWhenPositiveYieldRoundsUpToOneWei() public {
+        usdc.mint(address(this), 1);
+        usdc.approve(address(collector), type(uint256).max);
+
         vm.recordLogs();
-        collector.collectFee(wallet, 5); // fee = 5 * 1000 / 10000 = 0
+        collector.collectFee(wallet, 5); // fee = ceil(5 * 1000 / 10000) = 1
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 0, "No event should be emitted when floored fee is zero");
+        assertEq(logs.length, 1, "FeeCollected should be emitted");
+        assertEq(usdc.balanceOf(treasury), 1, "Rounded-up dust fee should reach treasury");
     }
 
     /// @dev SafeERC20 should surface transferFrom failure — mock reverts on underflow if needed.

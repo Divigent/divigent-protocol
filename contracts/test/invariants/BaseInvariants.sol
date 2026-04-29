@@ -676,7 +676,7 @@ abstract contract BaseInvariants is Test {
         uint256 expectedTreasury = (realizedYield * feeBps) / bpsDenom;
 
         // Rounding tolerance: each withdraw can under- or over-attribute by at
-        // most 2 wei (fee floor + gross floor). Scale linearly with ops.
+        // most 2 wei (fee ceiling + gross floor). Scale linearly with ops.
         uint256 ops = _withdrawHandler.withdrawCount() + _operatorHandler.operatorWithdrawCount();
         uint256 tolerance = ops * 2;
 
@@ -698,7 +698,7 @@ abstract contract BaseInvariants is Test {
     ///         deposit, operator change, pause toggle, oracle observation,
     ///         liquidity shock — cannot reduce an existing holder's redeemable
     ///         value. Tolerance is 2 wei per actor to absorb `_sharesToAssets`
-    ///         floor + fee-calc floor drift from the intervening state change.
+    ///         floor + fee-calc ceiling drift from the intervening state change.
     function assert_accounting_invariant_E() public {
         uint256 currentLoss = _yieldHandler.totalLossAccrued();
         uint256 currentWithdraws = _withdrawHandler.withdrawCount() + _operatorHandler.operatorWithdrawCount();

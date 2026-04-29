@@ -44,9 +44,9 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///             totalVaultAssets() >= totalDepositedUSDC at all times.
 ///         [INV-2] Principal preservation:
 ///             For any withdrawal, fee == 0 when yieldEarned == 0.
-///             fee == (yieldEarned * FEE_BPS) / BPS_DENOMINATOR always.
+///             fee == ceil(yieldEarned * FEE_BPS / BPS_DENOMINATOR) otherwise.
 ///         [INV-3] Fee bound:
-///             fee <= (yieldEarned * 10) / 100 — fee rate cannot exceed 10%.
+///             fee <= yieldEarned — fees never consume principal.
 ///         [INV-4] Statelessness:
 ///             USDC.balanceOf(address(this)) == 0 after every deposit() and withdraw().
 ///         [INV-5] Permissionless exit:
@@ -665,10 +665,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
                             + feeBps * costBasis * S1;
         if (denominator == 0) return 0;
 
-        // Uses OZ Math.mulDiv for 512-bit intermediate precision on the
-        // caller-controlled 4-way numerator. Ceil ensures usdcReturned >= desiredNetUSDC.
+        // Use explicit ceil rounding for the final share quote. The +1 target
+        // absorbs FeeCollector's ceiling-rounded fee so executing the returned
+        // shares does not under-deliver by a single USDC wei.
+        uint256 targetNet = desiredNetUSDC;
+        if (targetNet < type(uint256).max) targetNet += 1;
+
         dvUsdcShares = Math.mulDiv(
-            desiredNetUSDC * bpsDenom,
+            targetNet * bpsDenom,
             walletShares * S1,
             denominator,
             Math.Rounding.Ceil

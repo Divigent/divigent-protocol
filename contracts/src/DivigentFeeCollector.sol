@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /// @title  DivigentFeeCollector
@@ -18,11 +19,12 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 ///           EMERGENCY_MULTISIG (through the router). Recovers from USDC
 ///           blocklist against the treasury.
 ///         - Fee arithmetic uses checked math (Solidity 0.8.x) bounded by
-///           FEE_BPS. Fee is exactly 0 when yieldEarned is 0.
+///           FEE_BPS. Fee is exactly 0 when yieldEarned is 0, otherwise
+///           ceiling-rounded in the protocol's favour.
 ///         - All functions follow CEI: checks → effects → event; `collectFee`
 ///           has no state mutations, only an external token transfer.
 ///
-/// @custom:invariant fee <= FEE_BPS * yieldEarned / BPS_DENOMINATOR (always)
+/// @custom:invariant fee == ceil(FEE_BPS * yieldEarned / BPS_DENOMINATOR)
 /// @custom:invariant USDC.balanceOf(address(this)) == 0 always
 contract DivigentFeeCollector {
     using SafeERC20 for IERC20;
@@ -126,13 +128,13 @@ contract DivigentFeeCollector {
 
     /// @notice Calculates the protocol fee on `yieldEarned` without side effects.
     /// @param yieldEarned Gross yield earned in USDC (6 decimals).
-    /// @return fee        Protocol fee in USDC (always <= 10% of yieldEarned).
+    /// @return fee        Ceiling-rounded protocol fee in USDC.
     function calculateFee(uint256 yieldEarned)
         public
         pure
         returns (uint256 fee)
     {
-        fee = (yieldEarned * FEE_BPS) / BPS_DENOMINATOR;
+        fee = Math.mulDiv(yieldEarned, FEE_BPS, BPS_DENOMINATOR, Math.Rounding.Ceil);
     }
 
     /// @notice Collects the protocol fee from a completed withdrawal.

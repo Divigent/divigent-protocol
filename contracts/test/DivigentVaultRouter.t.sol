@@ -577,8 +577,8 @@ contract DivigentVaultRouterTest is Test {
 
         assertLe(actualYield, yieldAmount, "Realised user yield cannot exceed vault yield");
         assertGe(actualYield, yieldAmount - 1e6, "Virtual offset should retain less than 1 USDC of this yield");
-        assertLe(feeCollected, expectedFee, "Fee must not exceed 10% of realised user yield");
-        assertGe(feeCollected + withdrawalsCount, expectedFee, "Fee floor drift should be at most 1 wei per withdrawal");
+        assertGe(feeCollected, expectedFee, "Fee must not underpay protocol on realised user yield");
+        assertLe(feeCollected, expectedFee + withdrawalsCount, "Fee ceiling drift should be at most 1 wei per withdrawal");
 
         // No dvUSDC dust remaining
         assertEq(dvUsdc.balanceOf(alice), 0, "All shares must be redeemed");

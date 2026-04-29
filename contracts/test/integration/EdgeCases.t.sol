@@ -481,14 +481,14 @@ contract GapTests is TestBase {
 
     // ─── 3.6 Fee boundary: yield = 1 wei ───────────────────────────────────
 
-    function test_fee_oneWeiYield_feeIsZero() public {
-        // Fee on 1 wei yield: 1 * 1000 / 10000 = 0 (rounds down)
+    function test_fee_oneWeiYield_feeIsOneWei() public {
+        // Fee on 1 wei yield: ceil(1 * 1000 / 10000) = 1
         uint256 fee = feeCollector.calculateFee(1);
-        assertEq(fee, 0, "Fee on 1 wei yield should be 0 (rounds down)");
+        assertEq(fee, 1, "Fee on 1 wei yield should round up to 1");
     }
 
     function test_fee_tenWeiYield_feeIsOneWei() public {
-        // Fee on 10 wei yield: 10 * 1000 / 10000 = 1
+        // Fee on 10 wei yield: ceil(10 * 1000 / 10000) = 1
         uint256 fee = feeCollector.calculateFee(10);
         assertEq(fee, 1, "Fee on 10 wei yield should be 1 wei");
     }
