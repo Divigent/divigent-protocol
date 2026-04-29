@@ -305,6 +305,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     function setOperator(address operator, bool approved) external override {
+        if (!authorizedWallets[msg.sender]) revert NotAuthorised();
         if (operator == address(0)) revert ZeroAddress();
         isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
