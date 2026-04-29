@@ -300,7 +300,7 @@ abstract contract BaseInvariants is Test {
                 vm.startPrank(_allActors[i]);
                 _usdc.approve(address(_router), 10e6);
                 bool reverted;
-                try _router.deposit(10e6, _allActors[i]) {
+                try _router.deposit(10e6, _allActors[i], 0) {
                     reverted = false;
                 } catch {
                     reverted = true;

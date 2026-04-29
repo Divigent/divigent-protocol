@@ -43,7 +43,7 @@ contract EmergencyPauseTest is Actions {
 
         vm.prank(newUser);
         vm.expectRevert(IDivigentVaultRouter.DepositsPausedError.selector);
-        router.deposit(10_000e6, newUser);
+        router.deposit(10_000e6, newUser, 0);
 
         // The existing user's USDC and dvUSDC must not have changed.
         WalletSnap memory existingDuringPause = snap(existingUser);

@@ -40,7 +40,7 @@ contract FindingsValidation is TestBase {
         // Alice deposits and earns yield (realistic starting state)
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         // Simulate Aave rebasing yield
@@ -226,7 +226,7 @@ contract FindingsValidation is TestBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), whale);
-        router.deposit(whale, alice);
+        router.deposit(whale, alice, 0);
         vm.stopPrank();
 
         uint256 walletShares = dvUsdc.balanceOf(alice);

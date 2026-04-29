@@ -37,7 +37,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(unregistered);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(1_000e6, unregistered);
+        router.deposit(1_000e6, unregistered, 0);
     }
 
     function test_deposit_revertsWith_NotAuthorised_whenCallerIsNeitherWalletNorOperator() public {
@@ -50,7 +50,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(stranger);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(1_000e6, alice);
+        router.deposit(1_000e6, alice, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(IDivigentVaultRouter.DepositsPausedError.selector);
-        router.deposit(1_000e6, alice);
+        router.deposit(1_000e6, alice, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(IDivigentVaultRouter.InvalidAmount.selector);
-        router.deposit(tooSmall, alice);
+        router.deposit(tooSmall, alice, 0);
     }
 
     function test_deposit_revertsWith_TVLCapExceeded_whenDepositExceedsCap() public {
@@ -101,7 +101,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, minDeposit, cap));
-        router.deposit(minDeposit, alice);
+        router.deposit(minDeposit, alice, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(IDivigentVaultRouter.StaleOracle.selector);
-        router.deposit(1_000e6, alice);
+        router.deposit(1_000e6, alice, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ contract DepositValidationTest is Actions {
 
         vm.prank(victim);
         vm.expectRevert(IDivigentVaultRouter.ZeroAmount.selector);
-        router.deposit(minDeposit, victim);
+        router.deposit(minDeposit, victim, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -184,6 +184,6 @@ contract DepositValidationTest is Actions {
 
         vm.prank(alice);
         vm.expectRevert(IDivigentVaultRouter.PermitExpired.selector);
-        router.depositWithPermit(1_000e6, alice, expiredDeadline, 0, bytes32(0), bytes32(0));
+        router.depositWithPermit(1_000e6, alice, expiredDeadline, 0, bytes32(0), bytes32(0), 0);
     }
 }

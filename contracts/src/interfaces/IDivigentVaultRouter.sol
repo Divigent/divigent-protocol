@@ -181,10 +181,11 @@ interface IDivigentVaultRouter {
     ///         minting dvUSDC receipt tokens back to `wallet`.
     ///         Caller must be `wallet` itself or an authorised operator for `wallet`.
     ///         `wallet` must have pre-approved the router for at least `amount` USDC.
-    /// @param amount  USDC amount to deposit (6 decimals).
-    /// @param wallet  Agent wallet address (receives dvUSDC).
+    /// @param amount       USDC amount to deposit (6 decimals).
+    /// @param wallet       Agent wallet address (receives dvUSDC).
+    /// @param minSharesOut Minimum dvUSDC shares to mint; reverts if slippage exceeded.
     /// @return dvUsdcMinted Number of dvUSDC tokens minted.
-    function deposit(uint256 amount, address wallet)
+    function deposit(uint256 amount, address wallet, uint256 minSharesOut)
         external
         returns (uint256 dvUsdcMinted);
 
@@ -196,6 +197,7 @@ interface IDivigentVaultRouter {
     /// @param v        ECDSA signature component v.
     /// @param r        ECDSA signature component r.
     /// @param s        ECDSA signature component s.
+    /// @param minSharesOut Minimum dvUSDC shares to mint; reverts if slippage exceeded.
     /// @return dvUsdcMinted Number of dvUSDC tokens minted.
     function depositWithPermit(
         uint256 amount,
@@ -203,7 +205,8 @@ interface IDivigentVaultRouter {
         uint256 deadline,
         uint8   v,
         bytes32 r,
-        bytes32 s
+        bytes32 s,
+        uint256 minSharesOut
     ) external returns (uint256 dvUsdcMinted);
 
     /// @notice Redeems `shares` dvUSDC from `wallet`, withdrawing USDC from the

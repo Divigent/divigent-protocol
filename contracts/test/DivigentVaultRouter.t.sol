@@ -127,7 +127,7 @@ contract DivigentVaultRouterTest is Test {
         usdc.approve(address(router), amount);
 
         vm.prank(caller);
-        return router.deposit(amount, wallet);
+        return router.deposit(amount, wallet, 0);
     }
 
     /// @dev Build and sign an initializeFor() EIP-712 digest.
@@ -435,7 +435,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.StaleOracle.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -489,7 +489,7 @@ contract DivigentVaultRouterTest is Test {
 
         // operator_ deposits on alice's behalf — using alice's USDC
         vm.prank(operator_);
-        uint256 sharesMinted = router.deposit(depositAmount, alice);
+        uint256 sharesMinted = router.deposit(depositAmount, alice, 0);
 
         assertEq(dvUsdc.balanceOf(alice), sharesMinted, "Shares minted to alice");
         assertEq(dvUsdc.balanceOf(operator_), 0, "Operator receives no shares");
@@ -511,7 +511,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(rogue);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -528,7 +528,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(operator_);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -725,7 +725,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -836,7 +836,7 @@ contract DivigentVaultRouterTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, deposit2, router.currentTVLCap())
         );
-        router.deposit(deposit2, alice);
+        router.deposit(deposit2, alice, 0);
         vm.stopPrank();
     }
 
@@ -871,7 +871,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.DepositsPausedError.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
 
         // Withdraw still works

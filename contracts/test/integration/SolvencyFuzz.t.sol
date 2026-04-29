@@ -143,7 +143,7 @@ contract SolvencyInvariantTest is TestBase {
     function _deposit(address user, uint256 amount) internal {
         vm.startPrank(user);
         usdc.approve(address(router), amount);
-        router.deposit(amount, user);
+        router.deposit(amount, user, 0);
         vm.stopPrank();
     }
 

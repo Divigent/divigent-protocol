@@ -44,7 +44,7 @@ contract TVLCapEvolutionTest is Actions {
         usdc.approve(address(router), minDeposit);
         vm.prank(whale);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, minDeposit, 500_000e6));
-        router.deposit(minDeposit, whale);
+        router.deposit(minDeposit, whale, 0);
 
         // ===== Phase 2 ===== Cap not yet expanded at day 30 ==================
 
@@ -55,7 +55,7 @@ contract TVLCapEvolutionTest is Actions {
         usdc.approve(address(router), minDeposit);
         vm.prank(whale);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, minDeposit, 500_000e6));
-        router.deposit(minDeposit, whale);
+        router.deposit(minDeposit, whale, 0);
 
         // ===== Phase 3 ===== Day 31: cap expands to 2M =====================
 
@@ -72,7 +72,7 @@ contract TVLCapEvolutionTest is Actions {
         usdc.approve(address(router), minDeposit);
         vm.prank(whale);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, minDeposit, 2_000_000e6));
-        router.deposit(minDeposit, whale);
+        router.deposit(minDeposit, whale, 0);
 
         // ===== Phase 4 ===== Withdraw frees up cap headroom ==================
 

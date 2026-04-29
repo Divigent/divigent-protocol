@@ -104,7 +104,7 @@ abstract contract Actions is RouterIntegrationBase {
         usdc.approve(address(router), amount);
 
         vm.prank(wallet);
-        sharesMinted = router.deposit(amount, wallet);
+        sharesMinted = router.deposit(amount, wallet, 0);
 
         WalletSnap memory post = snap(wallet);
 
@@ -174,7 +174,7 @@ abstract contract Actions is RouterIntegrationBase {
         usdc.approve(address(router), amount);
 
         vm.prank(operator_);
-        sharesMinted = router.deposit(amount, wallet);
+        sharesMinted = router.deposit(amount, wallet, 0);
 
         WalletSnap memory post = snap(wallet);
 

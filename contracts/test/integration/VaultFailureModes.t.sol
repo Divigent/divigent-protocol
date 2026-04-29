@@ -28,7 +28,7 @@ contract SilentFailureTest is TestBase {
         super.setUp();
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
         vm.warp(block.timestamp + 1);
     }
@@ -68,7 +68,7 @@ contract SilentFailureTest is TestBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         // Enable silent failure on Morpho
@@ -101,7 +101,7 @@ contract SilentFailureTest is TestBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        uint256 minted = router.deposit(DEPOSIT, alice);
+        uint256 minted = router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         // dvUSDC was minted
@@ -146,7 +146,7 @@ contract SilentFailureTest is TestBase {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
         // Should NOT revert — routes to Aave instead
-        uint256 minted = router.deposit(DEPOSIT, alice);
+        uint256 minted = router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         assertGt(minted, 0, "Deposit should succeed via Aave fallback");

@@ -79,7 +79,7 @@ contract DivigentVaultRouterInflationDefenseTest is TestBase {
     function _depositFor(address wallet, uint256 amount) internal returns (uint256 shares) {
         vm.startPrank(wallet);
         usdc.approve(address(router), amount);
-        shares = router.deposit(amount, wallet);
+        shares = router.deposit(amount, wallet, 0);
         vm.stopPrank();
     }
 }

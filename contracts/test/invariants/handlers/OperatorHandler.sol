@@ -74,7 +74,7 @@ contract OperatorHandler is CommonBase, StdUtils {
         usdc.approve(address(router), amount);
 
         vm.prank(operator);
-        try router.deposit(amount, actor) {
+        try router.deposit(amount, actor, 0) {
             totalOperatorDeposited += amount;
             operatorDepositCount++;
         } catch {}

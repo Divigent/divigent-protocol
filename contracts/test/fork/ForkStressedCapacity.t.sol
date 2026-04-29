@@ -59,7 +59,7 @@ contract ForkStressedCapacityTest is ForkBase {
         deal(BASE_USDC, alice, depositAmount);
         vm.startPrank(alice);
         usdc.approve(address(router), depositAmount);
-        router.deposit(depositAmount, alice);
+        router.deposit(depositAmount, alice, 0);
         vm.stopPrank();
 
         uint256 morphoAfter = morphoVault.balanceOf(address(router));
@@ -95,7 +95,7 @@ contract ForkStressedCapacityTest is ForkBase {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectPartialRevert(IDivigentVaultRouter.NoSafeRoute.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 

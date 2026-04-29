@@ -314,7 +314,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     // ── Core: Deposit ─────────────────────────────────────────────────────────
 
     /// @inheritdoc IDivigentVaultRouter
-    function deposit(uint256 amount, address wallet)
+    function deposit(uint256 amount, address wallet, uint256 minSharesOut)
         external
         override
         nonReentrant
@@ -322,7 +322,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         onlyWalletOrOperator(wallet)
         returns (uint256 dvUsdcMinted)
     {
-        dvUsdcMinted = _deposit(amount, wallet);
+        dvUsdcMinted = _deposit(amount, wallet, minSharesOut);
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -335,7 +335,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         uint256 deadline,
         uint8   v,
         bytes32 r,
-        bytes32 s
+        bytes32 s,
+        uint256 minSharesOut
     )
         external
         override
@@ -352,7 +353,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             wallet, address(this), amount, deadline, v, r, s
         );
 
-        dvUsdcMinted = _deposit(amount, wallet);
+        dvUsdcMinted = _deposit(amount, wallet, minSharesOut);
     }
 
     // ── Core: Withdraw ────────────────────────────────────────────────────────
@@ -895,7 +896,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///
     ///      [INV-4]: USDC arrives in this contract at step 2, departs at step 7.
     ///               After step 7, USDC.balanceOf(address(this)) == 0.
-    function _deposit(uint256 amount, address wallet)
+    function _deposit(uint256 amount, address wallet, uint256 minSharesOut)
         internal
         returns (uint256 dvUsdcMinted)
     {
@@ -956,6 +957,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         dvUsdcMinted = _assetsToShares(amount, totalAssetsBefore, totalSupplyBefore);
 
         if (dvUsdcMinted == 0) revert ZeroAmount();
+        if (dvUsdcMinted < minSharesOut) {
+            revert SlippageExceeded(dvUsdcMinted, minSharesOut);
+        }
 
         DV_USDC.mint(wallet, dvUsdcMinted);
 

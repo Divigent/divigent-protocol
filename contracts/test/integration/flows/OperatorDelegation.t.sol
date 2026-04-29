@@ -41,7 +41,7 @@ contract OperatorDelegationTest is Actions {
 
         vm.prank(bobIntruder);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(10_000e6, wallet);
+        router.deposit(10_000e6, wallet, 0);
 
         // ━━━ Phase 2 — Wallet appoints alice as operator ━━━━━━━━━━━━━━━━━━━━━
 
@@ -52,7 +52,7 @@ contract OperatorDelegationTest is Actions {
         // Bob (still unapproved) can't act, even after Alice is appointed.
         vm.prank(bobIntruder);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(10_000e6, wallet);
+        router.deposit(10_000e6, wallet, 0);
 
         // ━━━ Phase 3 — Alice deposits on wallet's behalf ━━━━━━━━━━━━━━━━━━━━
 
@@ -88,7 +88,7 @@ contract OperatorDelegationTest is Actions {
         usdc.approve(address(router), 1_000e6);
         vm.prank(aliceOp);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(1_000e6, wallet);
+        router.deposit(1_000e6, wallet, 0);
 
         uint256 sharesLeft = dvUsdc.balanceOf(wallet);
         vm.prank(aliceOp);
@@ -162,7 +162,7 @@ contract OperatorDelegationTest is Actions {
         usdc.approve(address(router), 1_000e6);
         vm.prank(opA);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(1_000e6, wallet1);
+        router.deposit(1_000e6, wallet1, 0);
 
         // But the OTHER bindings are intact:
         // opA still acts for wallet2.
@@ -179,7 +179,7 @@ contract OperatorDelegationTest is Actions {
         usdc.approve(address(router), 1_000e6);
         vm.prank(opA);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(1_000e6, wallet2);
+        router.deposit(1_000e6, wallet2, 0);
 
         // opB still works for wallet1 — completely independent.
         operatorWithdraws(opB, wallet1, dvUsdc.balanceOf(wallet1) / 4);

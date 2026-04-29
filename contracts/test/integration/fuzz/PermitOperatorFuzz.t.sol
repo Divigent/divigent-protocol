@@ -157,7 +157,7 @@ contract PermitOperatorFuzzTest is Actions {
 
         vm.prank(op_);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(d2, user);
+        router.deposit(d2, user, 0);
 
         // Wallet's share balance is exactly what the first deposit minted —
         // no accidental revert-side-effect on the wallet.
@@ -191,7 +191,7 @@ contract PermitOperatorFuzzTest is Actions {
 
         vm.prank(opA);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(depB, userB);
+        router.deposit(depB, userB, 0);
 
         // And opA cannot withdraw from userB either.
         // (Even if userB had shares, which they don't here — belt-and-suspenders.)
@@ -227,7 +227,7 @@ contract PermitOperatorFuzzTest is Actions {
         uint256 balBefore = usdc.balanceOf(walletAddr);
         vm.prank(walletAddr);
         vm.expectRevert(IDivigentVaultRouter.PermitExpired.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
 
         assertEq(usdc.balanceOf(walletAddr), balBefore, "USDC not pulled on expired-permit revert");
     }
@@ -250,7 +250,7 @@ contract PermitOperatorFuzzTest is Actions {
 
         vm.prank(walletAddr);
         vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 
     /// @notice A permit signature can be replayed by third parties only
@@ -270,12 +270,12 @@ contract PermitOperatorFuzzTest is Actions {
 
         // First use succeeds.
         vm.prank(walletAddr);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
 
         // Second use of the same (v, r, s) — nonce has advanced, signature
         // no longer recovers to `walletAddr`.
         vm.prank(walletAddr);
         vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 }

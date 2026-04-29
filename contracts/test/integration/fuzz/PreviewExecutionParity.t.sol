@@ -52,7 +52,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (empty pool) != actual mint");
     }
@@ -73,7 +73,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (with yield) != actual mint");
     }
@@ -95,7 +95,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (mixed vault) != actual mint");
     }
