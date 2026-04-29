@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {DivigentVaultRouter} from "../../src/DivigentVaultRouter.sol";
 import {DivigentFeeCollector} from "../../src/DivigentFeeCollector.sol";
@@ -547,20 +548,21 @@ abstract contract BaseInvariants is Test {
     //  SHARE-ASSET INVARIANTS (2)
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// @notice ShareAsset-A: Supply * PPS ~= totalVaultAssets
-    ///         dvUSDC.totalSupply() * pricePerShare() / 1e18 approximates
-    ///         totalVaultAssets() within 1 USDC tolerance (virtual offset rounding).
+    /// @notice ShareAsset-A: pricePerShare mirrors the router's offset-adjusted
+    ///         share/asset exchange rate.
     function assert_shareAsset_invariant_A() public view {
         uint256 supply = _dvUsdc.totalSupply();
-        if (supply == 0) return;
 
         uint256 pps = _router.pricePerShare();
-        uint256 impliedAssets = (supply * pps) / 1e18;
         uint256 actualAssets = _router.totalVaultAssets();
-
-        assertApproxEqAbs(
-            impliedAssets, actualAssets, 1e6, "ShareAsset-A VIOLATED: supply * PPS diverges from totalVaultAssets"
+        uint256 expectedPps = Math.mulDiv(
+            actualAssets + ROUTER_VIRTUAL_OFFSET,
+            1e18,
+            supply + ROUTER_VIRTUAL_OFFSET,
+            Math.Rounding.Floor
         );
+
+        assertEq(pps, expectedPps, "ShareAsset-A VIOLATED: PPS diverges from offset-adjusted ratio");
     }
 
     /// @notice ShareAsset-B: Value conservation per-user.

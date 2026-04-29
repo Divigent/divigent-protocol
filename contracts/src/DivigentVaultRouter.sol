@@ -544,11 +544,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     /// @notice Current dvUSDC price in USDC, scaled by 1e18.
-    ///         Starts at 1e18 (1 USDC per dvUSDC) and rises monotonically.
+    ///         Uses the same virtual-offset ratio as mint/burn share math.
     function pricePerShare() external view override returns (uint256) {
-        uint256 supply = DV_USDC.totalSupply();
-        if (supply == 0) return 1e18;
-        return (totalVaultAssets() * 1e18) / supply;
+        return Math.mulDiv(
+            totalVaultAssets() + VIRTUAL_OFFSET,
+            1e18,
+            DV_USDC.totalSupply() + VIRTUAL_OFFSET,
+            Math.Rounding.Floor
+        );
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -630,35 +633,45 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///                / [ (bpsDen - feeBps) * walletShares * (A+VIRTUAL_OFFSET)
     ///                  + feeBps * costBasis * (S+VIRTUAL_OFFSET) ]
     ///
-    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC, and
-    ///      cap at walletShares (position value is a hard ceiling on what can be
-    ///      withdrawn regardless of desiredNet).
+    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC.
+    ///      If the requested net amount exceeds the wallet's full-position
+    ///      deliverable value, the preview reverts instead of silently returning
+    ///      a clamped quote that would fail `withdraw(..., minUsdcOut)`.
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external
         view
         override
         returns (uint256 dvUsdcShares)
     {
-        if (desiredNetUSDC == 0) return 0;
+        if (desiredNetUSDC == 0) revert ZeroAmount();
 
         uint256 walletShares = DV_USDC.balanceOf(wallet);
-        if (walletShares == 0) return 0;
+        if (walletShares == 0) revert NoPositionToWithdraw();
 
-        uint256 A1        = totalVaultAssets() + VIRTUAL_OFFSET;
-        uint256 S1        = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
+        uint256 totalAssets_ = totalVaultAssets();
+        uint256 totalSupply_ = DV_USDC.totalSupply();
+        uint256 A1           = totalAssets_ + VIRTUAL_OFFSET;
+        uint256 S1           = totalSupply_ + VIRTUAL_OFFSET;
         uint256 costBasis = costBasisUSDC[wallet];
 
         // Loss branch: wallet's total gross <= its costBasis ⇒ no fee on any slice.
-        uint256 grossAll = Math.mulDiv(walletShares, A1, S1, Math.Rounding.Floor);
+        uint256 grossAll = _sharesToAssets(walletShares, totalAssets_, totalSupply_);
+        if (grossAll == 0) revert PositionRoundsToZero();
+
         if (grossAll <= costBasis) {
-            // Degenerate dust case: entire wallet values to 0 USDC (floor).
-            // Any share count — including walletShares — would redeem to 0 gross
-            // and silently under-deliver. Signal "unserviceable" via 0.
-            if (grossAll == 0) return 0;
+            if (desiredNetUSDC > grossAll) {
+                revert UnserviceableNet(desiredNetUSDC, grossAll);
+            }
 
             dvUsdcShares = Math.mulDiv(desiredNetUSDC, S1, A1, Math.Rounding.Ceil);
-            if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
             return dvUsdcShares;
+        }
+
+        uint256 maxYield       = grossAll - costBasis;
+        uint256 maxFee         = FEE_COLLECTOR.calculateFee(maxYield);
+        uint256 maxDeliverable = grossAll - maxFee;
+        if (desiredNetUSDC > maxDeliverable) {
+            revert UnserviceableNet(desiredNetUSDC, maxDeliverable);
         }
 
         // Profit branch: fee applies to (gross - principalOut).
@@ -667,13 +680,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
         uint256 denominator = (bpsDenom - feeBps) * walletShares * A1
                             + feeBps * costBasis * S1;
-        if (denominator == 0) return 0;
+        if (denominator == 0) revert PreviewMathDegenerate();
 
         // Use explicit ceil rounding for the final share quote. The +1 target
         // absorbs FeeCollector's ceiling-rounded fee so executing the returned
-        // shares does not under-deliver by a single USDC wei.
+        // shares does not under-deliver by a single USDC wei. At the full-position
+        // boundary there is no extra deliverable wei, so solve for the exact max.
         uint256 targetNet = desiredNetUSDC;
-        if (targetNet < type(uint256).max) targetNet += 1;
+        if (targetNet < maxDeliverable) targetNet += 1;
 
         dvUsdcShares = Math.mulDiv(
             targetNet * bpsDenom,
@@ -682,7 +696,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             Math.Rounding.Ceil
         );
 
-        if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
+        if (dvUsdcShares > walletShares) {
+            revert UnserviceableNet(desiredNetUSDC, maxDeliverable);
+        }
     }
 
     /// @inheritdoc IDivigentVaultRouter

@@ -94,6 +94,10 @@ interface IDivigentVaultRouter {
     error WalletAlreadyAuthorised();
     error PermitExpired();
     error InsufficientPermitAllowance(uint256 currentAllowance, uint256 required);
+    error NoPositionToWithdraw();
+    error PositionRoundsToZero();
+    error PreviewMathDegenerate();
+    error UnserviceableNet(uint256 desiredNetUSDC, uint256 maxDeliverable);
     error InvalidAmount();
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();
@@ -271,10 +275,11 @@ interface IDivigentVaultRouter {
 
     /// @notice Preview how many dvUSDC shares must be redeemed to receive at least
     ///         `desiredNetUSDC` after the yield fee is deducted.
-    ///         Rounds up to ensure the user receives at least the requested amount.
+    ///         Rounds up to ensure the user receives at least the requested amount;
+    ///         reverts when the requested net amount is not serviceable.
     /// @param desiredNetUSDC Target net USDC after fee (6 decimals).
     /// @param wallet         Wallet whose cost basis is used for fee computation.
-    /// @return dvUsdcShares  Shares to redeem (capped at wallet's balance).
+    /// @return dvUsdcShares  Shares to redeem.
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external view returns (uint256 dvUsdcShares);
 
