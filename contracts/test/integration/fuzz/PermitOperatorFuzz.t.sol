@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
-import {MockERC20} from "../../mocks/MockERC20.sol";
 
 /// @title  Permit / Operator Sequence Fuzz
 /// @notice Adversarial fuzz coverage for the two delegation surfaces:
@@ -27,7 +26,7 @@ import {MockERC20} from "../../mocks/MockERC20.sol";
 ///             revoke → deposit reverts with NotAuthorised
 ///           - operator for wallet A cannot touch wallet B's position
 ///           - USDC permit surface (wrong signer, expired, replay) cleanly
-///             propagates the MockERC20 canonical errors
+///             reports router-level permit and allowance failures
 contract PermitOperatorFuzzTest is Actions {
     uint256 internal constant MIN_DEPOSIT = 10e6;
     uint256 internal constant MAX_DEPOSIT = 100_000e6;
@@ -233,8 +232,8 @@ contract PermitOperatorFuzzTest is Actions {
     }
 
     /// @notice A permit signed by a key other than `wallet` fails with the
-    ///         USDC's `PermitInvalidSigner` error — the router never reaches
-    ///         the `_deposit` path.
+    ///         the router-level insufficient-allowance error — the router never
+    ///         reaches the `_deposit` path.
     function test_depositWithPermit_fuzz_wrongSignerReverts(uint128 amount_) public {
         uint256 amount = bound(uint256(amount_), MIN_DEPOSIT, MAX_DEPOSIT);
 
@@ -249,7 +248,13 @@ contract PermitOperatorFuzzTest is Actions {
             signPermit(attackerKey, walletAddr, address(router), amount, deadline);
 
         vm.prank(walletAddr);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
         router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 
@@ -273,9 +278,16 @@ contract PermitOperatorFuzzTest is Actions {
         router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
 
         // Second use of the same (v, r, s) — nonce has advanced, signature
-        // no longer recovers to `walletAddr`.
+        // no longer recovers to `walletAddr`; allowance was consumed by the
+        // first deposit, so the router reports insufficient allowance.
         vm.prank(walletAddr);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
         router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 }

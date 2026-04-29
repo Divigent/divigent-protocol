@@ -93,6 +93,7 @@ interface IDivigentVaultRouter {
     error NotEmergencyMultisig();
     error WalletAlreadyAuthorised();
     error PermitExpired();
+    error InsufficientPermitAllowance(uint256 currentAllowance, uint256 required);
     error InvalidAmount();
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();

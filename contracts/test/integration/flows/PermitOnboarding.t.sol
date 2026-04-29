@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
-import {MockERC20} from "../../mocks/MockERC20.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title  Permit Onboarding End-to-End Flow
@@ -256,7 +255,13 @@ contract PermitOnboardingTest is Actions {
         (uint8 v, bytes32 r, bytes32 s) = signPermit(malloryKey, eve, address(router), amount, deadline);
 
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
         router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
 
         assertEq(usdc.nonces(eve), 0, "Eve's USDC nonce untouched by bad sig");
@@ -277,10 +282,16 @@ contract PermitOnboardingTest is Actions {
         router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
         assertEq(usdc.nonces(eve), 1, "Nonce consumed by first use");
 
-        // Replay: same (v, r, s) signs over nonce=0; USDC expects nonce=1 now.
-        // The recovered signer won't match eve -> PermitInvalidSigner.
+        // Replay: same (v, r, s) signs over nonce=0; USDC expects nonce=1 now,
+        // so permit fails and the router reports insufficient allowance.
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
         router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
     }
 
@@ -295,9 +306,15 @@ contract PermitOnboardingTest is Actions {
         (uint8 v, bytes32 r, bytes32 s) = signPermit(eveKey, eve, address(router), signedAmount, deadline);
 
         // USDC.permit rebuilds the digest with `calledAmount` and recovers a
-        // different address than eve -> revert.
+        // different address than eve; the router then checks allowance.
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                calledAmount
+            )
+        );
         router.depositWithPermit(calledAmount, eve, deadline, v, r, s, 0);
     }
 }

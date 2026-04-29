@@ -327,8 +327,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     /// @dev Uses USDC's EIP-2612 permit so no separate approve() tx is needed.
-    ///      The permit signature is validated by the USDC contract — if invalid,
-    ///      the USDC.permit() call reverts before any state change occurs here.
+    ///      The permit signature is best-effort because EIP-2612 permits can be
+    ///      submitted by anyone and therefore frontrun. After the attempt, the
+    ///      router verifies that allowance is sufficient before depositing.
     function depositWithPermit(
         uint256 amount,
         address wallet,
@@ -347,11 +348,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         if (block.timestamp > deadline) revert PermitExpired();
 
-        // Execute permit: grants this contract allowance from `wallet` for `amount` USDC.
-        // Reverts if signature is invalid, expired, or already used.
-        IERC20Permit(address(USDC)).permit(
+        try IERC20Permit(address(USDC)).permit(
             wallet, address(this), amount, deadline, v, r, s
-        );
+        ) {} catch {}
+
+        uint256 currentAllowance = USDC.allowance(wallet, address(this));
+        if (currentAllowance < amount) {
+            revert InsufficientPermitAllowance(currentAllowance, amount);
+        }
 
         dvUsdcMinted = _deposit(amount, wallet, minSharesOut);
     }

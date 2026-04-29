@@ -84,8 +84,8 @@ contract ForkPermitReplayTest is ForkBase {
         router.depositWithPermit(amount, keyedSigner, deadline, v, r, s, 0);
 
         // 2nd submission — replay. The nonce advanced on the first call,
-        // so this signature no longer recovers to `keyedSigner`. Live USDC
-        // reverts on the bad recovery. The router propagates the revert.
+        // so this signature no longer recovers to `keyedSigner`. The router
+        // swallows the permit failure, then fails its allowance check.
         // We don't pin the specific selector (Circle's implementation can
         // evolve), just that the call fails.
         vm.prank(relay);
