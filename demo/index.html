@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Divigent Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Base Sepolia MVP</p>
+          <h1>Divigent Vault</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="networkBadge" class="status-pill success">Base Sepolia</span>
+          <button
+            class="button secondary compact"
+            type="button"
+            data-action="refresh"
+            onclick="window.divigentDemo?.refresh()"
+          >
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      <section class="notice-band">
+        <div class="notice-line">
+          <strong>Testnet only.</strong>
+          <details class="notice-details">
+            <summary>Demo details</summary>
+            <p>
+              This site uses a fixed burner-style Base Sepolia demo wallet only to show how
+              agent interactions work on Divigent. We do not ask for a wallet connection, and
+              there are no mainnet interactions.
+            </p>
+          </details>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel balance-panel">
+          <div class="metric-row">
+            <div class="metric">
+              <span class="label label-with-symbol">
+                <img src="./assets/brands/usdc-token.svg" alt="" aria-hidden="true" />
+                USDC
+              </span>
+              <strong id="usdcBalance">10.00</strong>
+            </div>
+            <div class="metric">
+              <span class="label">dvUSDC</span>
+              <strong id="shareBalance">0.00</strong>
+            </div>
+          </div>
+
+          <div class="action-grid">
+            <button
+              id="depositButton"
+              class="button primary"
+              type="button"
+              data-action="deposit"
+              onclick="window.divigentDemo?.deposit()"
+            >
+              Deposit
+            </button>
+            <button
+              id="withdrawButton"
+              class="button danger"
+              type="button"
+              data-action="withdraw"
+              onclick="window.divigentDemo?.withdraw()"
+            >
+              Withdraw
+            </button>
+          </div>
+        </article>
+
+        <article class="panel yield-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Position</p>
+              <h2>Projected Accrual</h2>
+            </div>
+            <span id="positionBadge" class="status-pill neutral">No position</span>
+          </div>
+
+          <div class="yield-counter">
+            <span class="label">Projected yield</span>
+            <strong id="projectedYield">0</strong>
+            <span id="elapsedTime" class="small">Deposit to start projected APY</span>
+          </div>
+          <p id="routeNote" class="route-note">Loading route comparison.</p>
+
+          <div class="summary-grid">
+            <div>
+              <span class="label">Deposited</span>
+              <strong id="depositedValue">0.00 USDC</strong>
+            </div>
+            <div>
+              <span class="label">Estimated position</span>
+              <strong id="positionValue">0.00 USDC</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel activity-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Activity</h2>
+            </div>
+          </div>
+          <div id="activityLog" class="activity-log" aria-live="polite"></div>
+        </article>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.5/dist/ethers.umd.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -23,6 +23,7 @@ out/
 lib/
 
 # ./contracts
+contracts/.env
 contracts/foundry.lock
 contracts/cache/
 contracts/out/
@@ -33,6 +34,7 @@ contracts/echidna-corpus/
 contracts/echidna.yaml
 contracts/medusa-corpus/
 contracts/medusa.json
+contracts/deployments
 
 lcov.info
 # Vendored deps inside contracts/
@@ -47,3 +49,8 @@ contracts/slither-router.json
 # Node / JS (if you add a frontend later)
 node_modules/
 dist/
+.env*
+.dev.vars*
+demo-worker/.env*
+demo-worker/.dev.vars*
+!demo-worker/.dev.vars.example
