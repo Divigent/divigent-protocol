@@ -9,7 +9,6 @@ const DEMO_MAX_DEPOSITED = DEMO_DEPOSIT_AMOUNT * DEMO_MAX_DEPOSITS;
 const MAX_UINT256 = (1n << 256n) - 1n;
 const ACTION_COOLDOWN_MS = 3000;
 const IP_ACTION_COOLDOWN_MS = 10000;
-const IP_DAILY_DEPOSIT_LIMIT = 3;
 const IDEMPOTENCY_TTL_MS = 60000;
 const COORDINATOR_NAME = "divigent-base-sepolia-demo-wallet-v1";
 
@@ -100,10 +99,6 @@ function assertAllowedOrigin(request, env) {
 function clientIp(request) {
   const forwarded = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for");
   return forwarded?.split(",")[0]?.trim() || "unknown";
-}
-
-function utcDay() {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function idempotencyKey(request) {
@@ -214,24 +209,6 @@ async function ensureIpActionLimit(storage, ip) {
   await storage.put(key, now);
 }
 
-async function ensureDailyDepositLimit(storage, ip) {
-  if (ip === "unknown") return;
-
-  const key = `ip:${ip}:deposits:${utcDay()}`;
-  const count = Number((await storage.get(key)) || 0);
-  if (count >= IP_DAILY_DEPOSIT_LIMIT) {
-    throw new HttpError(429, "Daily demo deposit limit reached for this network.");
-  }
-}
-
-async function recordDailyDeposit(storage, ip) {
-  if (ip === "unknown") return;
-
-  const key = `ip:${ip}:deposits:${utcDay()}`;
-  const count = Number((await storage.get(key)) || 0);
-  await storage.put(key, count + 1);
-}
-
 async function readIdempotentResult(storage, action, ip, key) {
   if (!key) return null;
 
@@ -330,7 +307,6 @@ export class DemoWalletCoordinator {
       depositAmount: DEMO_DEPOSIT_AMOUNT,
       maxDeposits: DEMO_MAX_DEPOSITS,
       maxDeposited: DEMO_MAX_DEPOSITED,
-      ipDailyDepositLimit: IP_DAILY_DEPOSIT_LIMIT,
       ...demoState
     };
   }
@@ -343,7 +319,6 @@ export class DemoWalletCoordinator {
 
     await ensureCooldown(this.storage);
     await ensureIpActionLimit(this.storage, ip);
-    await ensureDailyDepositLimit(this.storage, ip);
 
     const before = await readDemoState(this.env);
     if (!before.canDeposit) {
@@ -378,7 +353,6 @@ export class DemoWalletCoordinator {
       amount: DEMO_DEPOSIT_AMOUNT
     };
 
-    await recordDailyDeposit(this.storage, ip);
     await writeIdempotentResult(this.storage, "deposit", ip, key, result);
     return result;
   }

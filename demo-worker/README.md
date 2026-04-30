@@ -11,7 +11,7 @@ The frontend is static and must not contain the demo wallet private key. This Wo
 
 `POST /deposit` ignores request parameters and always deposits exactly `10 USDC` from the fixed demo wallet, up to `25` total deposits. `POST /withdraw` ignores request parameters and withdraws all dvUSDC back to the same fixed demo wallet.
 
-The Worker routes all signed actions through a singleton Durable Object. The object serializes transactions, reads the deposit cap from chain, uses the pending nonce for each transaction, rate-limits repeated use from the same IP, applies a per-IP daily deposit cap, and dedupes repeated clicks with the `idempotency-key` header.
+The Worker routes all signed actions through a singleton Durable Object. The object serializes transactions, reads the deposit cap from chain, uses the pending nonce for each transaction, rate-limits repeated use from the same IP, and dedupes repeated clicks with the `idempotency-key` header.
 
 ## Setup
 
