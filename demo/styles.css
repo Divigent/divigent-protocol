@@ -268,7 +268,7 @@ button {
   grid-column: 1 / -1;
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   gap: 22px;
   align-content: center;
   min-height: 232px;
@@ -278,7 +278,8 @@ button {
 }
 
 .balance-panel .metric-row,
-.balance-panel .action-grid {
+.balance-panel .action-grid,
+.balance-panel .action-status {
   width: min(100%, 1140px);
   min-width: 0;
   justify-self: center;
@@ -296,6 +297,11 @@ button {
   grid-row: 2;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0;
+}
+
+.balance-panel .action-status {
+  grid-row: 3;
+  margin: -8px 0 0;
 }
 
 .balance-panel .metric {
@@ -467,6 +473,29 @@ button {
   color: var(--red);
 }
 
+.action-status {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 760;
+  line-height: 1.35;
+  padding: 10px 12px;
+}
+
+.action-status.success {
+  border-color: rgba(52, 211, 153, 0.22);
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+}
+
+.action-status.warning {
+  border-color: rgba(252, 211, 77, 0.22);
+  background: rgba(252, 211, 77, 0.1);
+  color: var(--amber);
+}
+
 .yield-counter {
   border: 1px solid rgba(52, 211, 153, 0.2);
   border-radius: 10px;
@@ -576,14 +605,15 @@ button {
   .balance-panel {
     display: grid;
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto;
+    grid-template-rows: auto auto auto;
     min-height: auto;
     padding: 18px;
     background: var(--surface);
   }
 
   .balance-panel .metric-row,
-  .balance-panel .action-grid {
+  .balance-panel .action-grid,
+  .balance-panel .action-status {
     width: 100%;
   }
 
@@ -593,6 +623,10 @@ button {
 
   .balance-panel .action-grid {
     grid-row: 2;
+  }
+
+  .balance-panel .action-status {
+    grid-row: 3;
   }
 
   .button {

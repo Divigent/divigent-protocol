@@ -15,6 +15,7 @@ const MORPHO_SWITCH_HURDLE_RAY = RAY / 200n;
 const PROJECTION_DECIMALS = 9;
 const POSITION_DISPLAY_DECIMALS = 4;
 const YIELD_DISPLAY_DECIMALS = 6;
+const ACTION_STATUS_CLEAR_MS = 4500;
 const PROJECTION_SCALE = 10n ** BigInt(PROJECTION_DECIMALS - USDC_DECIMALS);
 const VAULT_TYPES = {
   AAVE: 0,
@@ -63,6 +64,9 @@ const state = {
   aaveAssets: 0n,
   morphoAssets: 0n,
   recommendedRoute: null,
+  actionMessage: "",
+  actionTone: "neutral",
+  cooldownUntil: 0,
   apyByVault: {
     [VAULT_TYPES.AAVE]: 0n,
     [VAULT_TYPES.MORPHO]: 0n
@@ -75,6 +79,7 @@ const els = {
   networkBadge: document.querySelector("#networkBadge"),
   depositButton: document.querySelector("#depositButton"),
   withdrawButton: document.querySelector("#withdrawButton"),
+  actionStatus: document.querySelector("#actionStatus"),
   usdcBalance: document.querySelector("#usdcBalance"),
   shareBalance: document.querySelector("#shareBalance"),
   routeNote: document.querySelector("#routeNote"),
@@ -85,6 +90,9 @@ const els = {
   positionValue: document.querySelector("#positionValue"),
   activityLog: document.querySelector("#activityLog")
 };
+
+let actionStatusTimer = null;
+let cooldownTimer = null;
 
 function requireEthers() {
   if (!window.ethers) {
@@ -376,10 +384,55 @@ function errorMessage(error) {
   return error?.shortMessage || error?.reason || error?.message || "Transaction failed";
 }
 
+function cooldownRemainingMs() {
+  return Math.max(0, state.cooldownUntil - Date.now());
+}
+
+function clearActionStatusTimer() {
+  if (!actionStatusTimer) return;
+  clearTimeout(actionStatusTimer);
+  actionStatusTimer = null;
+}
+
+function setActionStatus(message, tone = "neutral", autoClearMs = 0) {
+  clearActionStatusTimer();
+  state.actionMessage = message;
+  state.actionTone = tone;
+  render();
+
+  if (!message || autoClearMs <= 0) return;
+  actionStatusTimer = setTimeout(() => {
+    if (state.actionMessage !== message) return;
+    state.actionMessage = "";
+    state.actionTone = "neutral";
+    render();
+  }, autoClearMs);
+}
+
+function startActionCooldown(error) {
+  const retryAfterMs = Number(error?.retryAfterMs || 0) || 3000;
+  state.cooldownUntil = Date.now() + retryAfterMs;
+
+  if (cooldownTimer) clearTimeout(cooldownTimer);
+  cooldownTimer = setTimeout(() => {
+    if (cooldownRemainingMs() > 0) return;
+    state.cooldownUntil = 0;
+    state.actionMessage = "";
+    state.actionTone = "neutral";
+    render();
+  }, retryAfterMs + 50);
+
+  setActionStatus(errorMessage(error), "warning");
+}
+
 function showActionError(error) {
-  const message = errorMessage(error);
   console.error(error);
-  window.alert(message);
+  if (error?.status === 429) {
+    startActionCooldown(error);
+    return;
+  }
+
+  setActionStatus(errorMessage(error), "warning");
 }
 
 function idempotencyKey() {
@@ -399,7 +452,11 @@ async function callDemoApi(action) {
   const result = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(result.error || `Demo API ${action} failed with status ${response.status}`);
+    const error = new Error(result.error || `Demo API ${action} failed with status ${response.status}`);
+    const retryAfterSeconds = Number(response.headers.get("retry-after") || 0);
+    error.status = response.status;
+    error.retryAfterMs = Number(result.retryAfterMs || 0) || retryAfterSeconds * 1000;
+    throw error;
   }
 
   return result;
@@ -407,7 +464,12 @@ async function callDemoApi(action) {
 
 function setPending(action) {
   state.pendingAction = action;
-  render();
+  if (!action) {
+    render();
+    return;
+  }
+
+  setActionStatus(action === "deposit" ? `Depositing ${DEMO_DEPOSIT_USDC} USDC...` : "Withdrawing position...");
 }
 
 async function initializeWallet() {
@@ -436,7 +498,7 @@ async function initializeWallet() {
 
 function render() {
   const hasPosition = state.shares > 0n;
-  const busy = Boolean(state.pendingAction);
+  const busy = Boolean(state.pendingAction) || cooldownRemainingMs() > 0;
   const depositsUsed = demoDepositCount();
   const depositCapacityLeft = canDepositMore();
   const projectedPositionValue = getProjectedPositionValue();
@@ -485,6 +547,12 @@ function render() {
   els.withdrawButton.textContent = state.pendingAction === "withdraw" ? "Withdrawing..." : "Withdraw";
   els.depositButton.disabled = busy || !depositCapacityLeft;
   els.withdrawButton.disabled = busy;
+
+  if (els.actionStatus) {
+    els.actionStatus.hidden = !state.actionMessage;
+    els.actionStatus.textContent = state.actionMessage;
+    els.actionStatus.className = `action-status ${state.actionTone}`;
+  }
 }
 
 async function refreshBalances() {
@@ -530,6 +598,7 @@ async function deposit() {
     const result = await callDemoApi("deposit");
     addActivity("Deposit", result.txHash);
     await refreshBalances();
+    setActionStatus("Deposit confirmed.", "success", ACTION_STATUS_CLEAR_MS);
   } catch (error) {
     showActionError(error);
   } finally {
@@ -543,14 +612,14 @@ async function withdraw() {
     await refreshBalances();
 
     if (state.shares === 0n) {
-      addLog("No dvUSDC position to withdraw yet.");
+      setActionStatus("No dvUSDC position to withdraw yet.", "warning", ACTION_STATUS_CLEAR_MS);
       return;
     }
 
     const result = await callDemoApi("withdraw");
     addActivity("Withdraw", result.txHash);
     await refreshBalances();
-    render();
+    setActionStatus("Withdraw confirmed.", "success", ACTION_STATUS_CLEAR_MS);
   } catch (error) {
     showActionError(error);
   } finally {

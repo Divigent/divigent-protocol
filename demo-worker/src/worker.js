@@ -6,6 +6,7 @@ const DEMO_DEPOSIT_USDC = 10n;
 const DEMO_DEPOSIT_AMOUNT = DEMO_DEPOSIT_USDC * 10n ** USDC_DECIMALS;
 const DEMO_MAX_DEPOSITS = 25n;
 const DEMO_MAX_DEPOSITED = DEMO_DEPOSIT_AMOUNT * DEMO_MAX_DEPOSITS;
+const MAX_UINT256 = (1n << 256n) - 1n;
 const ACTION_COOLDOWN_MS = 3000;
 const IP_ACTION_COOLDOWN_MS = 10000;
 const IP_DAILY_DEPOSIT_LIMIT = 3;
@@ -35,18 +36,20 @@ const ROUTER_ABI = [
 ];
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, options = {}) {
     super(message);
     this.status = status;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
-function json(data, status = 200, request, env) {
+function json(data, status = 200, request, env, extraHeaders = {}) {
   return new Response(JSON.stringify(data, bigintReplacer), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      ...corsHeaders(request, env)
+      ...corsHeaders(request, env),
+      ...extraHeaders
     }
   });
 }
@@ -186,7 +189,9 @@ async function ensureCooldown(storage) {
   const nextAllowedAt = lastActionAt + ACTION_COOLDOWN_MS;
 
   if (now < nextAllowedAt) {
-    throw new HttpError(429, "Demo wallet is processing too quickly. Try again in a few seconds.");
+    throw new HttpError(429, "Demo wallet is processing too quickly. Try again in a few seconds.", {
+      retryAfterMs: nextAllowedAt - now
+    });
   }
 
   await storage.put("lastActionAt", now);
@@ -201,7 +206,9 @@ async function ensureIpActionLimit(storage, ip) {
   const nextAllowedAt = lastActionAt + IP_ACTION_COOLDOWN_MS;
 
   if (now < nextAllowedAt) {
-    throw new HttpError(429, "Please wait a few seconds before using the demo wallet again.");
+    throw new HttpError(429, "Please wait a few seconds before using the demo wallet again.", {
+      retryAfterMs: nextAllowedAt - now
+    });
   }
 
   await storage.put(key, now);
@@ -252,9 +259,9 @@ async function ensureInitialized(router, nonceRef) {
   return tx.hash;
 }
 
-async function ensureExactAllowance(usdc, walletAddress, nonceRef) {
+async function ensureDepositAllowance(usdc, walletAddress, nonceRef) {
   const allowance = await usdc.allowance(walletAddress, ADDRESSES.router);
-  if (BigInt(allowance) === DEMO_DEPOSIT_AMOUNT) return [];
+  if (BigInt(allowance) >= DEMO_MAX_DEPOSITED) return [];
 
   const txHashes = [];
   if (BigInt(allowance) > 0n) {
@@ -263,7 +270,7 @@ async function ensureExactAllowance(usdc, walletAddress, nonceRef) {
     txHashes.push(resetTx.hash);
   }
 
-  const approveTx = await usdc.approve(ADDRESSES.router, DEMO_DEPOSIT_AMOUNT, {
+  const approveTx = await usdc.approve(ADDRESSES.router, MAX_UINT256, {
     nonce: nonceRef.next++
   });
   await approveTx.wait();
@@ -300,7 +307,13 @@ export class DemoWalletCoordinator {
       throw new HttpError(404, "Demo API route not found.");
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 500;
-      return json({ error: error.message || "Demo API failed." }, status, request, this.env);
+      const retryAfterMs = Number(error.retryAfterMs || 0);
+      const body = {
+        error: error.message || "Demo API failed.",
+        ...(retryAfterMs > 0 ? { retryAfterMs } : {})
+      };
+      const headers = retryAfterMs > 0 ? { "retry-after": String(Math.ceil(retryAfterMs / 1000)) } : {};
+      return json(body, status, request, this.env, headers);
     }
   }
 
@@ -351,7 +364,7 @@ export class DemoWalletCoordinator {
     };
 
     const initializeTxHash = await ensureInitialized(signedContracts.router, nonceRef);
-    const approvalTxHashes = await ensureExactAllowance(signedContracts.usdc, wallet.address, nonceRef);
+    const approvalTxHashes = await ensureDepositAllowance(signedContracts.usdc, wallet.address, nonceRef);
     const tx = await signedContracts.router.deposit(DEMO_DEPOSIT_AMOUNT, DEMO_WALLET_ADDRESS, 0n, {
       nonce: nonceRef.next++
     });
