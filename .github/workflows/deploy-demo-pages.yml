@@ -2,7 +2,7 @@ name: Deploy Demo Pages
 
 on:
   push:
-    branches: [main]
+    branches: [feat-mvp-demo]
     paths:
       - "demo/**"
       - ".github/workflows/deploy-demo-pages.yml"
