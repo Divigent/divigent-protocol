@@ -1,93 +1,126 @@
-# Demo Worker Handoff
+# Demo Worker Private Key Handoff
 
-This guide is for updating or replacing the Cloudflare Worker that powers the public demo at `demo.divigent.ai`.
+This guide is for teammates who need to keep the public demo running while the usual maintainer is away.
+
+The most common task is updating the demo wallet private key. Creating a new Worker is only needed if the Cloudflare Worker itself is being replaced.
 
 ## Current Setup
 
-- Frontend repo: `/Users/harshbhatt/Desktop/Divigent/divigent-demo-site`
-- Worker source: `/Users/harshbhatt/Desktop/divigent-protocol/demo-worker`
+- Public frontend repo: `/Users/harshbhatt/Desktop/Divigent/divigent-demo-site`
+- Worker source in protocol repo: `/Users/harshbhatt/Desktop/divigent-protocol/demo-worker`
 - Live Worker URL: `https://divigent-demo-api.harshbhatt0151.workers.dev`
-- Fixed demo wallet: `0x0447E4EA82EeeD2bb5b64D7C74A28AFE3e9249e6`
+- Current fixed demo wallet: `0x0447E4EA82EeeD2bb5b64D7C74A28AFE3e9249e6`
 - Base Sepolia chain id: `84532`
 
-The frontend is static. It does not hold the wallet private key. Deposits and withdrawals go through the Worker, which reads the private key from a Cloudflare secret.
+The private key must never be committed. The frontend never stores it. The Worker reads it from the Cloudflare secret named:
 
-## Update The Existing Worker
+```text
+DEMO_WALLET_PRIVATE_KEY
+```
 
-1. Open the Worker folder:
+## If You Are Changing To A New Private Key
+
+A different private key means a different wallet address. In that case, update both backend and frontend constants.
+
+1. Get the new wallet address from the new private key using a trusted local wallet/tool. Do not paste the private key into chat, docs, GitHub, or shell history.
+
+2. Fund the new wallet on Base Sepolia with:
+
+- Base Sepolia ETH for gas
+- Base Sepolia USDC for deposits
+
+3. Update the Worker fixed wallet address in:
+
+```text
+/Users/harshbhatt/Desktop/divigent-protocol/demo-worker/src/worker.js
+```
+
+Change:
+
+```js
+const DEMO_WALLET_ADDRESS = "OLD_ADDRESS";
+```
+
+to the new wallet address.
+
+4. Update the frontend fixed wallet address in the Pages repo:
+
+```text
+/Users/harshbhatt/Desktop/Divigent/divigent-demo-site/app.js
+```
+
+Change:
+
+```js
+const DEMO_WALLET_ADDRESS = "OLD_ADDRESS";
+```
+
+to the same new wallet address.
+
+5. Also update the protocol repo copy so future syncs do not drift:
+
+```text
+/Users/harshbhatt/Desktop/divigent-protocol/demo/app.js
+```
+
+6. Put the new private key into the Worker secret:
 
 ```sh
 cd /Users/harshbhatt/Desktop/divigent-protocol/demo-worker
+npx wrangler secret put DEMO_WALLET_PRIVATE_KEY
 ```
 
-2. Edit the Worker source:
-
-```text
-src/worker.js
-```
-
-3. Run the syntax check:
+7. Check and deploy the Worker:
 
 ```sh
 npm run check
-```
-
-4. Deploy:
-
-```sh
 npm run deploy
 ```
 
-If deploying from a non-interactive terminal, set a Cloudflare API token first:
+8. Commit and push the protocol repo changes:
 
 ```sh
-export CLOUDFLARE_API_TOKEN="..."
-npm run deploy
+cd /Users/harshbhatt/Desktop/divigent-protocol
+git add demo-worker/src/worker.js demo/app.js
+git commit -m "chore: rotate demo wallet"
+git push origin feat-mvp-demo
 ```
 
-5. Verify the deployed Worker:
+9. Commit and push the Pages frontend change:
+
+```sh
+cd /Users/harshbhatt/Desktop/Divigent/divigent-demo-site
+git add app.js
+git commit -m "chore: rotate demo wallet"
+git push origin main
+```
+
+10. Verify the Worker:
 
 ```sh
 curl https://divigent-demo-api.harshbhatt0151.workers.dev/status
 ```
 
-The response should include the fixed `wallet`, `usdc`, `shares`, `deposited`, `depositsUsed`, and `canDeposit`.
+The `wallet` field must equal the new wallet address.
 
-## Worker Secrets
-
-For production, the demo wallet private key must be stored as a Cloudflare secret:
-
-```sh
-npx wrangler secret put DEMO_WALLET_PRIVATE_KEY
-```
-
-The private key must resolve to:
+11. Hard refresh:
 
 ```text
-0x0447E4EA82EeeD2bb5b64D7C74A28AFE3e9249e6
+https://demo.divigent.ai
 ```
 
-Do not commit `.dev.vars` or any private key.
+The dashboard should read the new wallet state.
 
-For local development only:
+## If You Create A Brand-New Worker
 
-```sh
-cp .dev.vars.example .dev.vars
-```
+Do this only if the current Worker is being replaced. A private-key rotation alone does not require a new Worker.
 
-Then put the private key in `.dev.vars`.
+1. Create or copy a Worker project with the same `src/worker.js` logic.
 
-## Create A New Worker
-
-Use this only if the old Worker is being replaced.
-
-1. Copy the existing Worker folder or create a new Cloudflare Worker project.
-
-2. Keep these parts from `wrangler.jsonc`:
+2. Ensure `wrangler.jsonc` includes:
 
 ```jsonc
 "main": "src/worker.js",
-"compatibility_date": "2026-04-30",
 "durable_objects": {
   "bindings": [
     {
@@ -104,7 +137,7 @@ Use this only if the old Worker is being replaced.
 ]
 ```
 
-3. Set allowed frontend origins in `wrangler.jsonc`:
+3. Set allowed frontend origins:
 
 ```jsonc
 "vars": {
@@ -112,7 +145,11 @@ Use this only if the old Worker is being replaced.
 }
 ```
 
-4. Set the `DEMO_WALLET_PRIVATE_KEY` secret on the new Worker.
+4. Set the private key secret:
+
+```sh
+npx wrangler secret put DEMO_WALLET_PRIVATE_KEY
+```
 
 5. Deploy the new Worker:
 
@@ -121,15 +158,19 @@ npm run check
 npm run deploy
 ```
 
-6. Verify:
+6. Test the new Worker directly:
 
 ```sh
 curl https://NEW_WORKER_URL/status
 ```
 
-## Attach A Worker To The Demo Site
+7. Attach the new Worker URL to the Pages frontend by changing the default `DEMO_API_URL` in:
 
-The Pages frontend chooses its API endpoint in `app.js`:
+```text
+/Users/harshbhatt/Desktop/Divigent/divigent-demo-site/app.js
+```
+
+Current shape:
 
 ```js
 const DEMO_API_URL = (
@@ -139,39 +180,19 @@ const DEMO_API_URL = (
 ).replace(/\/+$/, "");
 ```
 
-To permanently attach a new Worker, edit this default URL in:
+Replace the default URL with the new Worker URL, then push `main` in the Pages repo.
 
-```text
-/Users/harshbhatt/Desktop/Divigent/divigent-demo-site/app.js
-```
-
-Then deploy the Pages repo:
-
-```sh
-cd /Users/harshbhatt/Desktop/Divigent/divigent-demo-site
-git add app.js
-git commit -m "chore: update demo worker url"
-git push origin main
-```
-
-GitHub Pages will publish the change automatically.
-
-For temporary testing without changing code, open:
+For temporary testing without editing the frontend, use:
 
 ```text
 https://demo.divigent.ai/?api=https://NEW_WORKER_URL
 ```
 
-For local static testing:
+## Safety Rules
 
-```text
-file:///Users/harshbhatt/Desktop/Divigent/divigent-demo-site/index.html?api=http://localhost:8787
-```
-
-## Common Checks
-
-- If deposits fail with an allowance error, verify the fixed wallet has approved the router and that the latest Worker is deployed.
-- If the page does not update after a transaction, check `GET /status`; the frontend uses this endpoint for the canonical demo wallet state.
-- If the browser shows CORS errors, add the frontend domain to `ALLOWED_ORIGINS` and redeploy the Worker.
-- If Wrangler refuses to deploy in CI or a non-interactive shell, set `CLOUDFLARE_API_TOKEN`.
+- Never commit `.dev.vars`.
+- Never commit, screenshot, paste, or chat the private key.
+- If the private key changes to a different wallet, update `DEMO_WALLET_ADDRESS` in both Worker and frontend.
+- If the Worker secret private key does not match `DEMO_WALLET_ADDRESS`, the Worker intentionally fails.
+- If deposits fail after a rotation, check `/status`, wallet funding, wallet address constants, and the deployed Worker version.
 
