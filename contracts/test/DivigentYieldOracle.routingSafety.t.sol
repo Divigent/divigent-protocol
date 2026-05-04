@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IDivigentYieldOracle} from "../src/interfaces/IDivigentYieldOracle.sol";
+import {IDivigentVaultRouter} from "../src/interfaces/IDivigentVaultRouter.sol";
 import {DivigentYieldOracle} from "../src/DivigentYieldOracle.sol";
 import {TestBase} from "test/TestBase.sol";
 
@@ -98,6 +99,35 @@ contract DivigentYieldOracleRoutingSafetyTest is TestBase {
         assertEq(dvUsdc.balanceOf(alice), walletSharesBefore, "wallet shares unchanged");
         assertEq(usdc.balanceOf(address(router)), routerUsdcBefore, "router USDC unchanged");
         assertEq(dvUsdc.totalSupply(), totalSupplyBefore, "share supply unchanged");
+    }
+
+    function test_deposit_doesNotFallbackToMorphoWhenOracleFlagsMorphoUnsafe() public {
+        uint256 amount = 20_000e6;
+
+        // Aave is oracle-safe at exactly 10% idle liquidity, but it cannot
+        // allocate this deposit amount. Morpho has capacity, but is unsafe.
+        _setAaveUtilization(100_000e6, 10_000e6);
+        morphoVault.setSharePrice(999_999);
+        morphoVault.setMaxDeposit(type(uint256).max);
+
+        assertTrue(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE), "precondition: Aave safe");
+        assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "precondition: Morpho unsafe");
+
+        (, IDivigentYieldOracle.VaultType recommended,) = yieldOracle.getOptimalVault();
+        assertEq(uint256(recommended), uint256(IDivigentYieldOracle.VaultType.AAVE), "oracle recommends safe Aave");
+
+        uint256 walletUsdcBefore = usdc.balanceOf(alice);
+        uint256 morphoAssetsBefore = morphoVault.totalAssets_();
+
+        vm.prank(alice);
+        usdc.approve(address(router), amount);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.deposit(amount, alice, 0);
+
+        assertEq(usdc.balanceOf(alice), walletUsdcBefore, "wallet USDC unchanged");
+        assertEq(morphoVault.totalAssets_(), morphoAssetsBefore, "unsafe Morpho receives no assets");
     }
 
     function _recordObservationAfter(uint256 elapsed, uint128 nextAaveRate, uint256 nextSharePrice) internal {

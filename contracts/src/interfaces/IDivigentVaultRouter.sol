@@ -113,10 +113,9 @@ interface IDivigentVaultRouter {
     error ZeroDvUsdc();
     error ZeroEmergencyMultisig();
 
-    /// @notice Reverts when neither vault can accommodate the requested deposit amount.
-    ///         This may occur when Aave has insufficient available liquidity AND Morpho's
-    ///         maxDeposit is below the requested amount. The depositor should retry with
-    ///         a smaller amount or wait for liquidity conditions to improve.
+    /// @notice Reverts when neither vault is both oracle-safe and able to
+    ///         accommodate the requested deposit amount. This may occur when
+    ///         capacity is unavailable or the oracle marks one or both routes unsafe.
     error NoSafeRoute(uint256 amount);
 
     /// @notice Reverts on withdrawal when Aave's redeemable cash plus Morpho's
@@ -313,8 +312,8 @@ interface IDivigentVaultRouter {
     function withdrawCapacity() external view returns (VaultCapacity memory);
 
     /// @notice Returns the oracle's recommended vault for a given deposit amount,
-    ///         accounting for amount-aware capacity checks.
-    ///         Reverts with NoSafeRoute if neither vault can accommodate `amount`.
+    ///         accounting for oracle safety and amount-aware capacity checks.
+    ///         Reverts with NoSafeRoute if neither vault passes both gates.
     /// @param amount USDC amount to route.
     /// @return vaultType Recommended VaultType (AAVE or MORPHO).
     function getRecommendedRoute(uint256 amount)

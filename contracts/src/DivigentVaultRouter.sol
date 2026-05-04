@@ -69,9 +69,9 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///         - Oracle freshness: _deposit() reverts with StaleOracle() if the oracle has
 ///           not been updated within MAX_STALENESS (2 hours), preventing routing decisions
 ///           based on stale rates.
-///         - Amount-aware safety: _canAllocate() checks vault-specific capacity before
-///           routing; if the primary vault is full, the alternate is tried; both-full
-///           reverts with NoSafeRoute(amount) rather than silently failing or holding USDC.
+///         - Deposit route safety: routing requires both the oracle's vault safety
+///           signal and vault-specific amount capacity before selecting either the
+///           recommended vault or its alternate.
 ///         - Exact-asset Morpho redemption: uses withdraw(assets, ...) instead of
 ///           convertToShares + redeem to eliminate share-rounding under-redemption risk.
 ///         - Actual-gross fee: fee is computed from USDC.balanceOf(this) after all vault
@@ -745,16 +745,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         (, vaultType, ) = ORACLE.getOptimalVault();
 
-        if (_canAllocate(vaultType, amount)) return vaultType;
-
-        IDivigentYieldOracle.VaultType alternate =
-            vaultType == IDivigentYieldOracle.VaultType.AAVE
-                ? IDivigentYieldOracle.VaultType.MORPHO
-                : IDivigentYieldOracle.VaultType.AAVE;
-
-        if (_canAllocate(alternate, amount)) return alternate;
-
-        revert NoSafeRoute(amount);
+        return _selectDepositRoute(vaultType, amount);
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -867,6 +858,45 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         if (assets > totalAssets_) assets = totalAssets_;
     }
 
+    // ── Internal: Deposit Routing Gates ───────────────────────────────────────
+
+    /// @dev Selects the deposit target by applying both route gates:
+    ///      oracle safety (`isVaultSafe`) and amount-specific capacity
+    ///      (`_canAllocate`). The oracle-recommended vault is tried first; the
+    ///      alternate is only eligible if it independently passes both gates.
+    function _selectDepositRoute(
+        IDivigentYieldOracle.VaultType recommended,
+        uint256 amount
+    ) internal view returns (IDivigentYieldOracle.VaultType vaultType) {
+        if (_canRouteDeposit(recommended, amount)) return recommended;
+
+        IDivigentYieldOracle.VaultType alternate =
+            recommended == IDivigentYieldOracle.VaultType.AAVE
+                ? IDivigentYieldOracle.VaultType.MORPHO
+                : IDivigentYieldOracle.VaultType.AAVE;
+
+        if (_canRouteDeposit(alternate, amount)) return alternate;
+
+        revert NoSafeRoute(amount);
+    }
+
+    /// @dev `_canAllocate` is capacity-only. This wrapper binds that capacity
+    ///      check to the oracle's current safety advisory so fallback routing
+    ///      cannot land in a vault the oracle has marked unsafe. If the oracle's
+    ///      safety read itself fails, treat the route as unsafe.
+    function _canRouteDeposit(
+        IDivigentYieldOracle.VaultType vaultType,
+        uint256 amount
+    ) internal view returns (bool) {
+        if (!_canAllocate(vaultType, amount)) return false;
+
+        try ORACLE.isVaultSafe(vaultType) returns (bool safe) {
+            return safe;
+        } catch {
+            return false;
+        }
+    }
+
     // ── Internal: Amount-Aware Vault Capacity ─────────────────────────────────
 
     /// @dev Returns true if `vaultType` appears to have sufficient capacity for `amount`.
@@ -944,8 +974,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        3. Trigger oracle update (permissionless, skipped if too recent).
     ///        4. Verify oracle is fresh (reverts StaleOracle if > 2 hours stale).
     ///        5. Query oracle for optimal vault.
-    ///        6. Check amount-aware vault capacity (_canAllocate); try alternate if needed.
-    ///           Reverts NoSafeRoute(amount) if both vaults lack capacity.
+    ///        6. Check oracle safety and amount-aware vault capacity; try alternate if needed.
+    ///           Reverts NoSafeRoute(amount) if neither vault passes both gates.
     ///        7. Supply USDC to the selected vault.
     ///        8. Mint dvUSDC shares to wallet.
     ///        9. Update cost basis.
@@ -984,19 +1014,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
         ) = ORACLE.getOptimalVault();
 
-        // Amount-aware capacity check: if the primary vault can't accommodate `amount`,
-        // fall back to the alternate vault; if neither can, revert NoSafeRoute.
-        if (!_canAllocate(vaultType, amount)) {
-            IDivigentYieldOracle.VaultType alternate =
-                vaultType == IDivigentYieldOracle.VaultType.AAVE
-                    ? IDivigentYieldOracle.VaultType.MORPHO
-                    : IDivigentYieldOracle.VaultType.AAVE;
-
-            if (!_canAllocate(alternate, amount)) {
-                revert NoSafeRoute(amount);
-            }
-            vaultType = alternate;
-        }
+        // Select a route that passes both oracle safety and amount capacity.
+        vaultType = _selectDepositRoute(vaultType, amount);
 
         // Route USDC to the selected vault
         // [INV-4]: After supply call, USDC.balanceOf(this) == 0

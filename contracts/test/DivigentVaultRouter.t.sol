@@ -754,6 +754,40 @@ contract DivigentVaultRouterTest is Test {
         assertGt(shares, 0, "Deposit must succeed via fallback to Morpho");
     }
 
+    /// @dev Regression for audit minor 6: fallback capacity is not enough.
+    ///      The alternate vault must also pass the oracle safety advisory.
+    function test_noSafeRoute_doesNotFallbackToUnsafeAlternate() public {
+        usdc.setBalance(address(aToken), 0);
+        morphoVault.setMaxDeposit(type(uint256).max);
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        oracle.setVaultSafe(IDivigentYieldOracle.VaultType.MORPHO, false);
+
+        uint256 amount = 10_000e6;
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+
+        vm.startPrank(alice);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.deposit(amount, alice, 0);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore, "reverted deposit must not pull USDC");
+        assertEq(morphoVault.totalAssets_(), 0, "unsafe alternate must receive no assets");
+    }
+
+    /// @dev The pre-flight view should mirror deposit routing and refuse to
+    ///      advertise an unsafe alternate just because it has capacity.
+    function test_getRecommendedRoute_doesNotReturnUnsafeAlternate() public {
+        usdc.setBalance(address(aToken), 0);
+        morphoVault.setMaxDeposit(type(uint256).max);
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        oracle.setVaultSafe(IDivigentYieldOracle.VaultType.MORPHO, false);
+
+        uint256 amount = 10_000e6;
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.getRecommendedRoute(amount);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  8. Fee invariants
     // ─────────────────────────────────────────────────────────────────────────
