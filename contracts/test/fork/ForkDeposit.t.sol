@@ -59,7 +59,7 @@ contract ForkDepositTest is ForkBase {
         vm.startPrank(alice);
         usdc.approve(address(router), 9e6);
         vm.expectRevert();
-        router.deposit(9e6, alice);
+        router.deposit(9e6, alice, 0);
         vm.stopPrank();
     }
 
@@ -102,7 +102,7 @@ contract ForkDepositTest is ForkBase {
         vm.startPrank(stranger);
         usdc.approve(address(router), 50_000e6);
         vm.expectRevert();
-        router.deposit(50_000e6, stranger);
+        router.deposit(50_000e6, stranger, 0);
         vm.stopPrank();
     }
 
@@ -110,7 +110,7 @@ contract ForkDepositTest is ForkBase {
         vm.startPrank(alice);
         usdc.approve(address(router), 1);
         vm.expectRevert();
-        router.deposit(0, alice);
+        router.deposit(0, alice, 0);
         vm.stopPrank();
     }
 }

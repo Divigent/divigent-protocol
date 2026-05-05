@@ -6,6 +6,8 @@ import {IDivigentYieldOracle} from "../../src/interfaces/IDivigentYieldOracle.so
 contract MockOracle {
     IDivigentYieldOracle.VaultType public optimalVault = IDivigentYieldOracle.VaultType.AAVE;
     bool public fresh_ = true;
+    bool public aaveSafe = true;
+    bool public morphoSafe = true;
     uint256 public lastObservationTime_;
 
     function getOptimalVault()
@@ -18,6 +20,10 @@ contract MockOracle {
 
     function isFresh() external view returns (bool) {
         return fresh_;
+    }
+
+    function isVaultSafe(IDivigentYieldOracle.VaultType vaultType) external view returns (bool) {
+        return vaultType == IDivigentYieldOracle.VaultType.AAVE ? aaveSafe : morphoSafe;
     }
 
     function lastObservationTime() external view returns (uint256) {
@@ -36,6 +42,14 @@ contract MockOracle {
 
     function setFresh(bool fresh__) external {
         fresh_ = fresh__;
+    }
+
+    function setVaultSafe(IDivigentYieldOracle.VaultType vaultType, bool safe) external {
+        if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
+            aaveSafe = safe;
+        } else {
+            morphoSafe = safe;
+        }
     }
 
     function setLastObservationTime(uint256 timestamp) external {

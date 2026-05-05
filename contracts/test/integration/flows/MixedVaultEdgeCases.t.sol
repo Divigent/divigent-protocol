@@ -90,9 +90,7 @@ contract MixedVaultEdgeCasesTest is Actions {
 
         // Aave side drop ~ 500 (1% of 50k), Morpho side drop ~ 49.5k (99% of 50k).
         assertApproxEqAbs(beforeWithdraw.aaveAssets - afterWithdraw.aaveAssets, 500e6, 10, "Aave drop ~ 500");
-        assertApproxEqAbs(
-            beforeWithdraw.morphoAssets - afterWithdraw.morphoAssets, 49_500e6, 10, "Morpho drop ~ 49.5k"
-        );
+        assertApproxEqAbs(beforeWithdraw.morphoAssets - afterWithdraw.morphoAssets, 49_500e6, 10, "Morpho drop ~ 49.5k");
 
         assertApproxEqAbs(returned, 50_000e6, 10, "Returned ~ 50k");
     }
@@ -164,18 +162,21 @@ contract MixedVaultEdgeCasesTest is Actions {
         uint256 totalReturned = usdc.balanceOf(aliceP) - aliceUsdcBefore;
         uint256 totalFee = usdc.balanceOf(treasury) - treasuryBefore;
         uint256 totalGross = totalReturned + totalFee;
+        uint256 residualAssets = router.totalVaultAssets();
 
-        // Gross should equal 100k principal + 1k yield, within accumulated
-        // O(n) rounding where n = 10 partial withdraws.
+        // Gross plus virtual residual should equal 100k principal + 1k yield,
+        // within accumulated O(n) rounding where n = 10 partial withdraws.
         assertApproxEqAbs(
-            totalGross,
+            totalGross + residualAssets,
             100_000e6 + totalYield,
             20,
-            "Sum of 10 partial withdraws == single full exit, within O(n) rounding"
+            "Sum of 10 partial withdraws + residual == single full exit"
         );
+        assertLe(residualAssets, 1e6, "Virtual residual stays below 1 USDC");
 
-        // Total fee should equal 10% of total yield (computed over all 10
+        // Total fee should equal 10% of realised yield (computed over all 10
         // withdraws, each of which charges 10% of its realised yield slice).
-        assertApproxEqAbs(totalFee, totalYield / 10, 20, "Sum of per-withdraw fees == 10% of total yield");
+        uint256 realisedYield = totalGross - 100_000e6;
+        assertApproxEqAbs(totalFee, expectedFee(realisedYield), 20, "Sum of per-withdraw fees == 10% of realised yield");
     }
 }

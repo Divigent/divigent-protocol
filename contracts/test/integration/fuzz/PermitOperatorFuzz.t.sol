@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
-import {MockERC20} from "../../mocks/MockERC20.sol";
 
 /// @title  Permit / Operator Sequence Fuzz
 /// @notice Adversarial fuzz coverage for the two delegation surfaces:
@@ -27,7 +26,7 @@ import {MockERC20} from "../../mocks/MockERC20.sol";
 ///             revoke → deposit reverts with NotAuthorised
 ///           - operator for wallet A cannot touch wallet B's position
 ///           - USDC permit surface (wrong signer, expired, replay) cleanly
-///             propagates the MockERC20 canonical errors
+///             reports router-level permit and allowance failures
 contract PermitOperatorFuzzTest is Actions {
     uint256 internal constant MIN_DEPOSIT = 10e6;
     uint256 internal constant MAX_DEPOSIT = 100_000e6;
@@ -157,7 +156,7 @@ contract PermitOperatorFuzzTest is Actions {
 
         vm.prank(op_);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(d2, user);
+        router.deposit(d2, user, 0);
 
         // Wallet's share balance is exactly what the first deposit minted —
         // no accidental revert-side-effect on the wallet.
@@ -191,7 +190,7 @@ contract PermitOperatorFuzzTest is Actions {
 
         vm.prank(opA);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(depB, userB);
+        router.deposit(depB, userB, 0);
 
         // And opA cannot withdraw from userB either.
         // (Even if userB had shares, which they don't here — belt-and-suspenders.)
@@ -227,14 +226,14 @@ contract PermitOperatorFuzzTest is Actions {
         uint256 balBefore = usdc.balanceOf(walletAddr);
         vm.prank(walletAddr);
         vm.expectRevert(IDivigentVaultRouter.PermitExpired.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
 
         assertEq(usdc.balanceOf(walletAddr), balBefore, "USDC not pulled on expired-permit revert");
     }
 
     /// @notice A permit signed by a key other than `wallet` fails with the
-    ///         USDC's `PermitInvalidSigner` error — the router never reaches
-    ///         the `_deposit` path.
+    ///         the router-level insufficient-allowance error — the router never
+    ///         reaches the `_deposit` path.
     function test_depositWithPermit_fuzz_wrongSignerReverts(uint128 amount_) public {
         uint256 amount = bound(uint256(amount_), MIN_DEPOSIT, MAX_DEPOSIT);
 
@@ -249,8 +248,14 @@ contract PermitOperatorFuzzTest is Actions {
             signPermit(attackerKey, walletAddr, address(router), amount, deadline);
 
         vm.prank(walletAddr);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 
     /// @notice A permit signature can be replayed by third parties only
@@ -270,12 +275,19 @@ contract PermitOperatorFuzzTest is Actions {
 
         // First use succeeds.
         vm.prank(walletAddr);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
 
         // Second use of the same (v, r, s) — nonce has advanced, signature
-        // no longer recovers to `walletAddr`.
+        // no longer recovers to `walletAddr`; allowance was consumed by the
+        // first deposit, so the router reports insufficient allowance.
         vm.prank(walletAddr);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, walletAddr, deadline, v, r, s);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
+        router.depositWithPermit(amount, walletAddr, deadline, v, r, s, 0);
     }
 }

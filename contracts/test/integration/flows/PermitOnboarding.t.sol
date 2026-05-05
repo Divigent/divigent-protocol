@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Actions} from "../helpers/Actions.sol";
-import {MockERC20} from "../../mocks/MockERC20.sol";
 import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title  Permit Onboarding End-to-End Flow
@@ -13,7 +12,7 @@ import {IDivigentVaultRouter} from "../../../src/interfaces/IDivigentVaultRouter
 ///             the router's `InitializeFor` type. Permissionless: anyone holding
 ///             a valid signature can submit, which is how sponsored onboarding
 ///             works on L2s.
-///           - `depositWithPermit(amount, wallet, deadline, v, r, s)`: EIP-2612
+///           - `depositWithPermit(amount, wallet, deadline, v, r, s, minSharesOut)`: EIP-2612
 ///             signature over USDC's `Permit` type. The router pulls USDC from
 ///             `wallet` without a prior `approve` tx. Caller must be the wallet
 ///             itself or a pre-approved operator (the permit authorises the
@@ -78,7 +77,7 @@ contract PermitOnboardingTest is Actions {
         uint256 walletDvUsdcBefore = dvUsdc.balanceOf(wallet);
 
         vm.prank(wallet);
-        uint256 shares = router.depositWithPermit(depositAmount, wallet, deadline, pv, pr, ps);
+        uint256 shares = router.depositWithPermit(depositAmount, wallet, deadline, pv, pr, ps, 0);
 
         // The permit granted and the deposit consumed the allowance in one tx.
         assertEq(usdc.balanceOf(wallet), walletUsdcBefore - depositAmount, "Deposit: wallet's USDC pulled via permit");
@@ -134,7 +133,7 @@ contract PermitOnboardingTest is Actions {
         uint256 operatorUsdcBefore = usdc.balanceOf(operator_);
 
         vm.prank(operator_);
-        uint256 shares = router.depositWithPermit(amount, wallet, deadline, v, r, s);
+        uint256 shares = router.depositWithPermit(amount, wallet, deadline, v, r, s, 0);
 
         // USDC flows from WALLET (not operator), dvUSDC to WALLET (not operator).
         assertEq(usdc.balanceOf(wallet), walletUsdcBefore - amount, "USDC pulled from wallet");
@@ -164,7 +163,7 @@ contract PermitOnboardingTest is Actions {
         assertEq(usdc.allowance(eve, address(router)), 0, "Pre: no standing approval");
 
         vm.prank(eve);
-        uint256 shares = router.depositWithPermit(amount, eve, deadline, v, r, s);
+        uint256 shares = router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
 
         assertGt(shares, 0, "Shares minted");
         assertEq(dvUsdc.balanceOf(eve), shares, "dvUSDC credited to eve");
@@ -256,8 +255,14 @@ contract PermitOnboardingTest is Actions {
         (uint8 v, bytes32 r, bytes32 s) = signPermit(malloryKey, eve, address(router), amount, deadline);
 
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, eve, deadline, v, r, s);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
+        router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
 
         assertEq(usdc.nonces(eve), 0, "Eve's USDC nonce untouched by bad sig");
     }
@@ -274,14 +279,20 @@ contract PermitOnboardingTest is Actions {
 
         // First call consumes the nonce.
         vm.prank(eve);
-        router.depositWithPermit(amount, eve, deadline, v, r, s);
+        router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
         assertEq(usdc.nonces(eve), 1, "Nonce consumed by first use");
 
-        // Replay: same (v, r, s) signs over nonce=0; USDC expects nonce=1 now.
-        // The recovered signer won't match eve -> PermitInvalidSigner.
+        // Replay: same (v, r, s) signs over nonce=0; USDC expects nonce=1 now,
+        // so permit fails and the router reports insufficient allowance.
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(amount, eve, deadline, v, r, s);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                amount
+            )
+        );
+        router.depositWithPermit(amount, eve, deadline, v, r, s, 0);
     }
 
     function test_depositWithPermit_revertsOnAmountMismatchVsSignedValue() public {
@@ -295,9 +306,15 @@ contract PermitOnboardingTest is Actions {
         (uint8 v, bytes32 r, bytes32 s) = signPermit(eveKey, eve, address(router), signedAmount, deadline);
 
         // USDC.permit rebuilds the digest with `calledAmount` and recovers a
-        // different address than eve -> revert.
+        // different address than eve; the router then checks allowance.
         vm.prank(eve);
-        vm.expectRevert(MockERC20.PermitInvalidSigner.selector);
-        router.depositWithPermit(calledAmount, eve, deadline, v, r, s);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.InsufficientPermitAllowance.selector,
+                0,
+                calledAmount
+            )
+        );
+        router.depositWithPermit(calledAmount, eve, deadline, v, r, s, 0);
     }
 }

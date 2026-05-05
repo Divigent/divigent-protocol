@@ -155,6 +155,7 @@ contract ExitRedirectAdversarialTest is Actions {
         // Withdraw 40% — gross ≤ 40% * (100k + yld) ≤ 44k ≤ Aave balance (50k + yld),
         // so Aave alone can cover even after redirect.
         uint256 shares = (dvUsdc.balanceOf(user) * 40) / 100;
+        uint256 principalOut = (router.costBasisUSDC(user) * shares) / dvUsdc.balanceOf(user);
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 expectedNet = router.previewRedeem(shares, user);
 
@@ -163,9 +164,12 @@ contract ExitRedirectAdversarialTest is Actions {
 
         assertApproxEqAbs(returned, expectedNet, 4, "net returned close to previewed");
 
-        // Realised yield for 40% withdraw = 40% of total yield (yld).
-        uint256 expectedFee = (yld * 40) / 100 / 10; // 10% fee on realised yield slice
-        assertApproxEqAbs(feeCharged, expectedFee, 4, "fee == 10% of realised yield, post-redirect");
+        uint256 realisedYield = returned + feeCharged - principalOut;
+        uint256 idealYield = (yld * 40) / 100;
+        uint256 residualBound = (idealYield * 1e6) / (AAVE_DEP + MORPHO_DEP + 1e6) + 4;
+        assertLe(realisedYield, idealYield, "realised yield cannot exceed ideal slice");
+        assertGe(realisedYield + residualBound, idealYield, "residual is bounded by virtual share ownership");
+        assertEq(feeCharged, expectedFee(realisedYield), "fee == 10% of realised yield, post-redirect");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

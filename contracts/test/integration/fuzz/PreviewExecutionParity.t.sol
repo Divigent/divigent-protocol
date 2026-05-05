@@ -52,7 +52,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (empty pool) != actual mint");
     }
@@ -73,7 +73,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (with yield) != actual mint");
     }
@@ -95,7 +95,7 @@ contract PreviewExecutionParityTest is Actions {
         vm.prank(subject);
         usdc.approve(address(router), amount);
         vm.prank(subject);
-        uint256 actualMinted = router.deposit(amount, subject);
+        uint256 actualMinted = router.deposit(amount, subject, 0);
 
         assertEq(actualMinted, predicted, "previewDeposit (mixed vault) != actual mint");
     }
@@ -107,7 +107,7 @@ contract PreviewExecutionParityTest is Actions {
     /// @notice `previewRedeem` must equal the net USDC actually delivered on
     ///         withdraw, within the rounding envelope of one vault redemption
     ///         (Morpho's exact-asset `withdraw` can lose up to 1 wei to share
-    ///         flooring; the fee-calc floors another).
+    ///         flooring; the fee calculation can ceiling-round by another).
     function test_previewRedeem_fuzz_parityAaveOnlyWithYield(uint128 deposit_, uint96 yield_, uint256 sharePct_)
         public
     {

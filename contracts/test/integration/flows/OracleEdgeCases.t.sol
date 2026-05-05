@@ -91,8 +91,7 @@ contract OracleEdgeCasesTest is Actions {
 
             // Spot rate must never go negative: the rate field is uint256 and
             // negative deltas are explicitly clamped to zero inside
-            // `recordObservation` (the `currentSharePrice > lastMorphoSharePrice_`
-            // guard).
+            // `recordObservation` by requiring movement above the stored baseline.
             assertEq(
                 realOracle.morphoSpotRate(), 0, "morphoSpotRate == 0 when share price is decreasing (no negative rates)"
             );

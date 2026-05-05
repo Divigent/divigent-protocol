@@ -127,7 +127,7 @@ contract DivigentVaultRouterTest is Test {
         usdc.approve(address(router), amount);
 
         vm.prank(caller);
-        return router.deposit(amount, wallet);
+        return router.deposit(amount, wallet, 0);
     }
 
     /// @dev Build and sign an initializeFor() EIP-712 digest.
@@ -193,29 +193,36 @@ contract DivigentVaultRouterTest is Test {
         assertApproxEqAbs(predictedOut, actualOut, 1, "previewRedeem inconsistent with withdraw");
     }
 
-    /// @dev previewWithdrawNet for full withdrawal (desiredNet >= position value)
-    ///      must return exactly the wallet's share balance, not overflow.
-    function test_previewWithdrawNet_cappedAtWalletShares() public {
+    /// @dev previewWithdrawNet for impossible requests must fail loudly instead
+    ///      of returning walletShares that would later fail `minUsdcOut`.
+    function test_previewWithdrawNet_revertsWhenDesiredExceedsPositionValue() public {
         uint256 depositAmount = 20_000e6;
         _deposit(alice, alice, depositAmount);
 
-        uint256 hugDesiredNet = 1_000_000_000e6; // far more than deposited
-        uint256 shares = router.previewWithdrawNet(hugDesiredNet, alice);
+        uint256 hugeDesiredNet = 1_000_000_000e6; // far more than deposited
+        uint256 maxDeliverable = router.previewRedeem(dvUsdc.balanceOf(alice), alice);
 
-        uint256 walletBalance = dvUsdc.balanceOf(alice);
-        assertEq(shares, walletBalance, "Should be capped at wallet shares");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.UnserviceableNet.selector,
+                hugeDesiredNet,
+                maxDeliverable
+            )
+        );
+        router.previewWithdrawNet(hugeDesiredNet, alice);
     }
 
-    /// @dev previewWithdrawNet returns 0 shares when desiredNet == 0.
-    function test_previewWithdrawNet_zeroDesired() public {
+    /// @dev previewWithdrawNet rejects a zero desired net amount explicitly.
+    function test_previewWithdrawNet_zeroDesired_reverts() public {
         uint256 depositAmount = 10_000e6;
         _deposit(alice, alice, depositAmount);
-        uint256 shares = router.previewWithdrawNet(0, alice);
-        assertEq(shares, 0);
+
+        vm.expectRevert(IDivigentVaultRouter.ZeroAmount.selector);
+        router.previewWithdrawNet(0, alice);
     }
 
     /// @dev previewWithdrawNet must not under-deliver when the vault is in drawdown.
-    ///      Guarantee: actualOut >= desiredNetUSDC (or capped at walletShares).
+    ///      Guarantee: actualOut >= desiredNetUSDC for every serviceable quote.
     ///      The closed-form solver assumes yield = gross - principalOut unconditionally
     ///      and treats negative yield as a fee rebate, inflating what each share returns.
     ///      In reality withdraw() floors yield at 0 (no negative fee), so the preview
@@ -232,9 +239,9 @@ contract DivigentVaultRouterTest is Test {
         uint256 desiredNet = 100e6; // want 100 USDC net
         uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
 
-        // Sanity: not capped at walletShares (so the guarantee must hold)
+        // Sanity: request is comfortably below the full-position boundary.
         uint256 walletShares = dvUsdc.balanceOf(alice);
-        assertLt(predictedShares, walletShares, "Not the cap case");
+        assertLt(predictedShares, walletShares, "not a full-position quote");
 
         // Execute the actual withdraw
         vm.prank(alice);
@@ -244,19 +251,25 @@ contract DivigentVaultRouterTest is Test {
         assertGe(actualOut, desiredNet - 1, "loss: actualOut < desiredNet - 1 wei");
     }
 
-    /// @dev previewWithdrawNet must handle a huge desiredNet relative to tiny position
-    ///      by capping at walletShares without reverting.
-    function test_previewWithdrawNet_tinyShares_hugeDesired() public {
+    /// @dev previewWithdrawNet must reject huge desiredNet values relative to a
+    ///      tiny position instead of silently returning walletShares.
+    function test_previewWithdrawNet_tinyShares_hugeDesired_reverts() public {
         uint256 depositAmount = MIN_DEPOSIT; // 10 USDC
         _deposit(alice, alice, depositAmount);
 
         uint256 walletShares = dvUsdc.balanceOf(alice);
+        uint256 maxDeliverable = router.previewRedeem(walletShares, alice);
 
         // Ask for astronomical net (inside uint128.max to avoid input-overflow revert)
         uint256 huge = type(uint128).max;
-        uint256 predicted = router.previewWithdrawNet(huge, alice);
-
-        assertEq(predicted, walletShares, "Preview caps at walletShares");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.UnserviceableNet.selector,
+                huge,
+                maxDeliverable
+            )
+        );
+        router.previewWithdrawNet(huge, alice);
     }
 
     /// @dev Fuzz invariant: for any valid (depositAmount, yield/loss, desiredNet),
@@ -292,36 +305,29 @@ contract DivigentVaultRouterTest is Test {
         uint256 positionValue = router.previewRedeem(shares, alice);
         assertGe(positionValue, 8_000e6, "positionValue lower-bounded by -20% on 10k min");
 
-        // Cap desired at 95% of positionValue so predictedShares never hits
-        // the wallet-shares ceiling (the old "capped, guarantee relaxed" escape).
+        // Bound desired at 95% of positionValue so predictedShares never needs
+        // the wallet's full position.
         uint256 desired = bound(uint256(desiredNet_), 1e6, (positionValue * 95) / 100);
 
         uint256 predictedShares = router.previewWithdrawNet(desired, alice);
         assertGt(predictedShares, 0, "preview returned zero shares for non-dust desired");
-        assertLt(predictedShares, dvUsdc.balanceOf(alice), "preview never hits cap under 95% bound");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "preview stays below full position under 95% bound");
 
         uint256 actualOut = router.previewRedeem(predictedShares, alice);
         assertGe(actualOut + 1, desired, "actualOut < desired - 1 wei (preview underestimated)");
     }
 
-    /// @dev Dust-position edge: when the vault's value per share floors to 0
-    ///      (walletShares * A1 / S1 == 0 via Floor rounding), the loss branch
-    ///      would otherwise return shares capped at walletShares that then
-    ///      deliver 0 USDC — violating the >= desiredNet guarantee silently.
-    ///      The preview must return 0 in this degenerate state.
-    function test_previewWithdrawNet_grossAllZero_returnsZero() public {
-        uint256 depositAmount = 1_000e6;
-        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
-        _deposit(alice, alice, depositAmount);
+    /// @dev Dust-position edge: when the wallet's shares floor to 0 assets,
+    ///      the preview must not return a quote that cannot deliver positive
+    ///      USDC.
+    ///      The preview must revert in this degenerate state.
+    function test_previewWithdrawNet_grossAllZero_reverts() public {
+        vm.prank(address(router));
+        dvUsdc.mint(alice, 1);
 
-        // Total vault wipeout: A1 = 0 + 1 = 1, while S1 = 1_000e6 + 1
-        // → grossAll = floor(1_000e6 · 1 / (1_000e6 + 1)) = 0
-        aToken.burn(address(router), depositAmount);
-        assertEq(router.totalVaultAssets(), 0, "Vault must be wiped to hit grossAll=0");
-
-        // Any positive desired is unserviceable; preview must signal via 0
-        uint256 shares = router.previewWithdrawNet(1e6, alice);
-        assertEq(shares, 0, "grossAll=0 must short-circuit to 0 shares");
+        // Any positive desired is unserviceable; preview must fail loudly.
+        vm.expectRevert(IDivigentVaultRouter.PositionRoundsToZero.selector);
+        router.previewWithdrawNet(1, alice);
     }
 
     /// @dev Exact break-even boundary: grossAll == costBasis. The loss-branch
@@ -332,7 +338,7 @@ contract DivigentVaultRouterTest is Test {
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
         _deposit(alice, alice, depositAmount);
 
-        // No yield, no loss. grossAll ~= costBasis (modulo the +1 virtual offset).
+        // No yield, no loss. grossAll ~= costBasis (modulo the virtual offset).
         // A=100_000e6, S=100_000e6, walletShares=100_000e6, costBasis=100_000e6
         //   grossAll = floor(100_000e6 * (100_000e6+1) / (100_000e6+1)) = 100_000e6
         //   costBasis = 100_000e6 -> grossAll <= costBasis -> loss branch
@@ -364,7 +370,7 @@ contract DivigentVaultRouterTest is Test {
         uint256 predictedShares = router.previewWithdrawNet(desiredNet, alice);
 
         assertGt(predictedShares, 0, "Returns shares for servable amount");
-        assertLt(predictedShares, dvUsdc.balanceOf(alice), "Not the cap case");
+        assertLt(predictedShares, dvUsdc.balanceOf(alice), "not a full-position quote");
 
         vm.prank(alice);
         uint256 actualOut = router.withdraw(predictedShares, alice, 0);
@@ -372,11 +378,9 @@ contract DivigentVaultRouterTest is Test {
         assertGe(actualOut, desiredNet - 1, "deep loss: actualOut < desiredNet - 1 wei");
     }
 
-    /// @dev Cap boundary in loss regime: caller asks for more than their total
-    ///      position value. Preview must cap at walletShares. The >= desiredNet
-    ///      guarantee is intentionally waived in the cap case (user opted for
-    ///      max withdrawal, not a specific amount).
-    function test_previewWithdrawNet_lossBranch_cappedAtWalletShares() public {
+    /// @dev Impossible request in loss regime: caller asks for more than their
+    ///      total position value, so preview must revert with the max deliverable.
+    function test_previewWithdrawNet_lossBranch_revertsWhenDesiredExceedsPositionValue() public {
         uint256 depositAmount = 100_000e6;
         oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
         _deposit(alice, alice, depositAmount);
@@ -384,17 +388,43 @@ contract DivigentVaultRouterTest is Test {
         // 30% drawdown: position is worth ~70k
         aToken.burn(address(router), 30_000e6);
 
-        // Ask for 200k (way more than position value of 70k)
-        uint256 predictedShares = router.previewWithdrawNet(200_000e6, alice);
+        uint256 desiredNet = 200_000e6;
+        uint256 maxDeliverable = router.previewRedeem(dvUsdc.balanceOf(alice), alice);
 
-        // Must cap at walletShares
-        assertEq(predictedShares, dvUsdc.balanceOf(alice), "Caps at walletShares in loss");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.UnserviceableNet.selector,
+                desiredNet,
+                maxDeliverable
+            )
+        );
+        router.previewWithdrawNet(desiredNet, alice);
+    }
 
-        // Withdraw delivers full remaining position value - caller gets ~70k, not 200k
+    /// @dev With a large virtual offset, deep-loss redemptions can otherwise
+    ///      quote phantom virtual assets. convertToAssets/previewRedeem/withdraw
+    ///      must cap at physical totalAssets.
+    function test_sharesToAssets_capsAtTotalAssets_underDeepLoss() public {
+        uint256 depositAmount = 100_000e6;
+        uint256 postLossAssets = 1e6; // 1 USDC remains
+        uint256 virtualOffset = 1e6;
+
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        uint256 shares = _deposit(alice, alice, depositAmount);
+
+        aToken.burn(address(router), depositAmount - postLossAssets);
+        assertEq(router.totalVaultAssets(), postLossAssets, "deep loss applied");
+
+        uint256 uncappedQuote = (shares * (postLossAssets + virtualOffset)) / (dvUsdc.totalSupply() + virtualOffset);
+        assertGt(uncappedQuote, postLossAssets, "precondition: virtual offset would overquote");
+
+        assertEq(router.convertToAssets(shares), postLossAssets, "convertToAssets caps at real assets");
+        assertEq(router.previewRedeem(shares, alice), postLossAssets, "previewRedeem uses capped gross");
+
         vm.prank(alice);
-        uint256 actualOut = router.withdraw(predictedShares, alice, 0);
-        assertApproxEqAbs(actualOut, 70_000e6, 2, "Cap delivers remaining position value");
-        assertLt(actualOut, 200_000e6, "Cap explicitly short-of-desired in this regime");
+        uint256 actualOut = router.withdraw(shares, alice, 0);
+        assertEq(actualOut, postLossAssets, "withdraw returns only physical assets");
+        assertEq(router.totalVaultAssets(), 0, "all physical assets withdrawn");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -415,7 +445,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.StaleOracle.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -469,7 +499,7 @@ contract DivigentVaultRouterTest is Test {
 
         // operator_ deposits on alice's behalf — using alice's USDC
         vm.prank(operator_);
-        uint256 sharesMinted = router.deposit(depositAmount, alice);
+        uint256 sharesMinted = router.deposit(depositAmount, alice, 0);
 
         assertEq(dvUsdc.balanceOf(alice), sharesMinted, "Shares minted to alice");
         assertEq(dvUsdc.balanceOf(operator_), 0, "Operator receives no shares");
@@ -491,7 +521,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(rogue);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -508,7 +538,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(operator_);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.NotAuthorised.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -516,9 +546,8 @@ contract DivigentVaultRouterTest is Test {
     //  4. Proportional principal attribution across many partial withdrawals
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev After N partial withdrawals, the total fee paid must equal exactly
-    ///      (totalYieldEarned * FEE_BPS / BPS_DENOM), and principal must never
-    ///      be touched — even under cumulative rounding.
+    /// @dev After N partial withdrawals, fees must track realised user yield,
+    ///      and principal must never be touched — even under cumulative rounding.
     function test_partialWithdrawals_principalAttributionCorrect() public {
         uint256 depositAmount = 50_000e6;
         uint256 yieldAmount = 5_000e6; // 10% synthetic yield
@@ -533,6 +562,7 @@ contract DivigentVaultRouterTest is Test {
         aToken.mint(address(router), yieldAmount);
 
         uint256 usdcReturnedTotal = 0;
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 sharesToRedeem = totalShares;
         uint256 withdrawalsCount = 5;
         uint256 chunkShares = sharesToRedeem / withdrawalsCount;
@@ -550,18 +580,15 @@ contract DivigentVaultRouterTest is Test {
         // Total returned must be >= depositAmount (principal always safe)
         assertGe(usdcReturnedTotal, depositAmount, "Principal must be fully returned");
 
-        // Fee must be 10% of yield only (never on principal)
-        // Net yield to alice = totalReturned - depositAmount
-        uint256 netYield = usdcReturnedTotal - depositAmount;
-        // Gross yield before fee = netYield / (1 - feePct) = netYield * 10 / 9
-        // We test the bound: netYield <= yieldAmount (fee was deducted)
-        //                    netYield >= yieldAmount * 90% (fee ≤ 10%)
-        assertLe(netYield, yieldAmount, "Fee must have been deducted from yield");
-        assertGe(
-            netYield * BPS_DENOM,
-            yieldAmount * (BPS_DENOM - FEE_BPS) - 1,
-            "Fee must not exceed 10% of yield (allow 1 wei rounding)"
-        );
+        uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
+        uint256 actualGross = usdcReturnedTotal + feeCollected;
+        uint256 actualYield = actualGross - depositAmount;
+        uint256 expectedFee = (actualYield * FEE_BPS) / BPS_DENOM;
+
+        assertLe(actualYield, yieldAmount, "Realised user yield cannot exceed vault yield");
+        assertGe(actualYield, yieldAmount - 1e6, "Virtual offset should retain less than 1 USDC of this yield");
+        assertGe(feeCollected, expectedFee, "Fee must not underpay protocol on realised user yield");
+        assertLe(feeCollected, expectedFee + withdrawalsCount, "Fee ceiling drift should be at most 1 wei per withdrawal");
 
         // No dvUSDC dust remaining
         assertEq(dvUsdc.balanceOf(alice), 0, "All shares must be redeemed");
@@ -708,7 +735,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -725,6 +752,40 @@ contract DivigentVaultRouterTest is Test {
         uint256 amount = 10_000e6;
         uint256 shares = _deposit(alice, alice, amount);
         assertGt(shares, 0, "Deposit must succeed via fallback to Morpho");
+    }
+
+    /// @dev Regression for audit minor 6: fallback capacity is not enough.
+    ///      The alternate vault must also pass the oracle safety advisory.
+    function test_noSafeRoute_doesNotFallbackToUnsafeAlternate() public {
+        usdc.setBalance(address(aToken), 0);
+        morphoVault.setMaxDeposit(type(uint256).max);
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        oracle.setVaultSafe(IDivigentYieldOracle.VaultType.MORPHO, false);
+
+        uint256 amount = 10_000e6;
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+
+        vm.startPrank(alice);
+        usdc.approve(address(router), amount);
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.deposit(amount, alice, 0);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore, "reverted deposit must not pull USDC");
+        assertEq(morphoVault.totalAssets_(), 0, "unsafe alternate must receive no assets");
+    }
+
+    /// @dev The pre-flight view should mirror deposit routing and refuse to
+    ///      advertise an unsafe alternate just because it has capacity.
+    function test_getRecommendedRoute_doesNotReturnUnsafeAlternate() public {
+        usdc.setBalance(address(aToken), 0);
+        morphoVault.setMaxDeposit(type(uint256).max);
+        oracle.setOptimalVault(IDivigentYieldOracle.VaultType.AAVE);
+        oracle.setVaultSafe(IDivigentYieldOracle.VaultType.MORPHO, false);
+
+        uint256 amount = 10_000e6;
+        vm.expectRevert(abi.encodeWithSelector(IDivigentVaultRouter.NoSafeRoute.selector, amount));
+        router.getRecommendedRoute(amount);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -759,8 +820,10 @@ contract DivigentVaultRouterTest is Test {
         // Simulate yield: inflate the router's aToken balance (mirrors Aave rebasing)
         aToken.mint(address(router), yieldAmount);
 
-        uint256 aliceBefore = usdc.balanceOf(alice);
         uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 expectedGross = router.convertToAssets(shares);
+        uint256 expectedYield = expectedGross - depositAmount;
+        uint256 expectedFee = feeCollector.calculateFee(expectedYield);
 
         vm.prank(alice);
         uint256 returned = router.withdraw(shares, alice, 0);
@@ -768,10 +831,9 @@ contract DivigentVaultRouterTest is Test {
         uint256 netYield = returned - depositAmount;
         uint256 feeCollected = usdc.balanceOf(treasury) - treasuryBefore;
 
-        // Fee = 10% of yield; net yield = 90% of yield
-        // Allow 1 wei rounding tolerance throughout
-        assertApproxEqAbs(feeCollected, yieldAmount / 10, 1, "Fee must be 10% of yield");
-        assertApproxEqAbs(netYield, yieldAmount * 9 / 10, 1, "Net yield must be 90% of gross yield");
+        assertEq(feeCollected, expectedFee, "Fee must be 10% of realised user yield");
+        assertEq(netYield, expectedYield - expectedFee, "Net yield must match realised yield after fee");
+        assertGe(expectedYield, yieldAmount - 1e6, "Virtual offset should retain less than 1 USDC of this yield");
     }
 
     /// @dev Fee must be exactly 0 at the waterline — `actualGross == principalOut`
@@ -818,7 +880,7 @@ contract DivigentVaultRouterTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IDivigentVaultRouter.TVLCapExceeded.selector, deposit2, router.currentTVLCap())
         );
-        router.deposit(deposit2, alice);
+        router.deposit(deposit2, alice, 0);
         vm.stopPrank();
     }
 
@@ -853,7 +915,7 @@ contract DivigentVaultRouterTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.DepositsPausedError.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
 
         // Withdraw still works

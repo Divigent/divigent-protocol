@@ -117,7 +117,7 @@ contract GapTests is TestBase {
         // State 2: post-Aave-deposit → Aave populated, Morpho untouched.
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         (uint256 aave1, uint256 morpho1) = router.getCurrentAllocation();
@@ -207,7 +207,7 @@ contract GapTests is TestBase {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(aliceKey, permitHash);
 
         vm.prank(alice);
-        uint256 minted = router.depositWithPermit(amount, alice, deadline, v, r, s);
+        uint256 minted = router.depositWithPermit(amount, alice, deadline, v, r, s, 0);
 
         assertGt(minted, 0, "Should mint dvUSDC");
         assertEq(dvUsdc.balanceOf(alice), minted);
@@ -220,7 +220,7 @@ contract GapTests is TestBase {
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSignature("PermitExpired()"));
-        router.depositWithPermit(DEPOSIT, alice, deadline, v, r, s);
+        router.depositWithPermit(DEPOSIT, alice, deadline, v, r, s, 0);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -232,7 +232,7 @@ contract GapTests is TestBase {
     function test_deposit_revertsOnZeroAmount() public {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSignature("InvalidAmount()"));
-        router.deposit(0, alice);
+        router.deposit(0, alice, 0);
     }
 
     // ─── 2.2 InvalidAmount below MIN_DEPOSIT ────────────────────────────────
@@ -241,7 +241,7 @@ contract GapTests is TestBase {
         vm.startPrank(alice);
         usdc.approve(address(router), 5e6);
         vm.expectRevert(abi.encodeWithSignature("InvalidAmount()"));
-        router.deposit(5e6, alice); // 5 USDC < MIN_DEPOSIT (10 USDC)
+        router.deposit(5e6, alice, 0); // 5 USDC < MIN_DEPOSIT (10 USDC)
         vm.stopPrank();
     }
 
@@ -251,7 +251,7 @@ contract GapTests is TestBase {
         // Alice deposits, gets some shares
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
 
         uint256 shares = dvUsdc.balanceOf(alice);
         // Try to withdraw more shares than held
@@ -273,7 +273,7 @@ contract GapTests is TestBase {
     function test_withdraw_revertsWhenBothVaultsDrained() public {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         uint256 shares = dvUsdc.balanceOf(alice);
@@ -330,7 +330,7 @@ contract GapTests is TestBase {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
         // Deposit should SUCCEED — recordObservation auto-refreshes the oracle
-        uint256 minted = router.deposit(DEPOSIT, alice);
+        uint256 minted = router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         assertGt(minted, 0, "Deposit succeeds because oracle auto-heals");
@@ -346,7 +346,7 @@ contract GapTests is TestBase {
         vm.startPrank(stranger);
         usdc.approve(address(router), DEPOSIT);
         vm.expectRevert(abi.encodeWithSignature("NotAuthorised()"));
-        router.deposit(DEPOSIT, stranger); // stranger never called initialize()
+        router.deposit(DEPOSIT, stranger, 0); // stranger never called initialize()
         vm.stopPrank();
     }
 
@@ -354,7 +354,7 @@ contract GapTests is TestBase {
         // Alice has a position
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         uint256 shares = dvUsdc.balanceOf(alice);
@@ -384,7 +384,7 @@ contract GapTests is TestBase {
     function test_operator_cannotTransferDvUsdc() public {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         router.setOperator(operator_, true);
         vm.stopPrank();
 
@@ -406,7 +406,7 @@ contract GapTests is TestBase {
     function test_deposit_minDeposit_10USDC() public {
         vm.startPrank(alice);
         usdc.approve(address(router), MIN_DEP);
-        uint256 minted = router.deposit(MIN_DEP, alice);
+        uint256 minted = router.deposit(MIN_DEP, alice, 0);
         vm.stopPrank();
 
         assertGt(minted, 0, "MIN_DEPOSIT should mint non-zero shares");
@@ -416,7 +416,7 @@ contract GapTests is TestBase {
     function test_depositWithdraw_minDeposit_roundTrip() public {
         vm.startPrank(alice);
         usdc.approve(address(router), MIN_DEP);
-        router.deposit(MIN_DEP, alice);
+        router.deposit(MIN_DEP, alice, 0);
 
         uint256 shares = dvUsdc.balanceOf(alice);
         uint256 balBefore = usdc.balanceOf(alice);
@@ -434,7 +434,7 @@ contract GapTests is TestBase {
     function test_withdraw_revertsOnSlippageExceeded() public {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
 
         uint256 shares = dvUsdc.balanceOf(alice);
         // Set minOut higher than what the position is worth
@@ -454,7 +454,7 @@ contract GapTests is TestBase {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
         vm.expectRevert(abi.encodeWithSignature("DepositsPausedError()"));
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
     }
 
@@ -464,7 +464,7 @@ contract GapTests is TestBase {
         // Deposit first
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         uint256 shares = dvUsdc.balanceOf(alice);
@@ -481,14 +481,14 @@ contract GapTests is TestBase {
 
     // ─── 3.6 Fee boundary: yield = 1 wei ───────────────────────────────────
 
-    function test_fee_oneWeiYield_feeIsZero() public {
-        // Fee on 1 wei yield: 1 * 1000 / 10000 = 0 (rounds down)
+    function test_fee_oneWeiYield_feeIsOneWei() public {
+        // Fee on 1 wei yield: ceil(1 * 1000 / 10000) = 1
         uint256 fee = feeCollector.calculateFee(1);
-        assertEq(fee, 0, "Fee on 1 wei yield should be 0 (rounds down)");
+        assertEq(fee, 1, "Fee on 1 wei yield should round up to 1");
     }
 
     function test_fee_tenWeiYield_feeIsOneWei() public {
-        // Fee on 10 wei yield: 10 * 1000 / 10000 = 1
+        // Fee on 10 wei yield: ceil(10 * 1000 / 10000) = 1
         uint256 fee = feeCollector.calculateFee(10);
         assertEq(fee, 1, "Fee on 10 wei yield should be 1 wei");
     }
@@ -503,7 +503,7 @@ contract GapTests is TestBase {
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
         vm.expectPartialRevert(IDivigentVaultRouter.NoSafeRoute.selector);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
     }
 

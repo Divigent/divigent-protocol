@@ -44,9 +44,9 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///             totalVaultAssets() >= totalDepositedUSDC at all times.
 ///         [INV-2] Principal preservation:
 ///             For any withdrawal, fee == 0 when yieldEarned == 0.
-///             fee == (yieldEarned * FEE_BPS) / BPS_DENOMINATOR always.
+///             fee == ceil(yieldEarned * FEE_BPS / BPS_DENOMINATOR) otherwise.
 ///         [INV-3] Fee bound:
-///             fee <= (yieldEarned * 10) / 100 — fee rate cannot exceed 10%.
+///             fee <= yieldEarned — fees never consume principal.
 ///         [INV-4] Statelessness:
 ///             USDC.balanceOf(address(this)) == 0 after every deposit() and withdraw().
 ///         [INV-5] Permissionless exit:
@@ -69,9 +69,9 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///         - Oracle freshness: _deposit() reverts with StaleOracle() if the oracle has
 ///           not been updated within MAX_STALENESS (2 hours), preventing routing decisions
 ///           based on stale rates.
-///         - Amount-aware safety: _canAllocate() checks vault-specific capacity before
-///           routing; if the primary vault is full, the alternate is tried; both-full
-///           reverts with NoSafeRoute(amount) rather than silently failing or holding USDC.
+///         - Deposit route safety: routing requires both the oracle's vault safety
+///           signal and vault-specific amount capacity before selecting either the
+///           recommended vault or its alternate.
 ///         - Exact-asset Morpho redemption: uses withdraw(assets, ...) instead of
 ///           convertToShares + redeem to eliminate share-rounding under-redemption risk.
 ///         - Actual-gross fee: fee is computed from USDC.balanceOf(this) after all vault
@@ -102,10 +102,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///         and ensures share minting doesn't degenerate to zero).
     uint256 public constant MIN_DEPOSIT = 10e6;
 
-    /// @notice Virtual offset used in share minting to prevent first-depositor attacks.
-    ///         Adding 1 to both totalSupply and totalAssets makes the first deposit
-    ///         behave identically to subsequent deposits — no inflation vector.
-    uint256 private constant VIRTUAL_OFFSET = 1;
+    /// @notice Virtual assets/shares used in share minting and redemption math.
+    /// @dev Sized to USDC/dvUSDC's 6 decimals. This keeps first deposits 1:1
+    ///      while making donation-style share-price inflation economically impractical.
+    uint256 private constant VIRTUAL_OFFSET = 1e6;
 
     /// @dev EIP-712 type hash for the initializeFor() signed authorisation.
     ///      Nonce is included so each signature is single-use by construction,
@@ -113,8 +113,18 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     bytes32 private constant INITIALIZE_FOR_TYPEHASH =
         keccak256("InitializeFor(address wallet,uint256 deadline,uint256 nonce)");
 
-    /// @dev Gas limit on Morpho view calls inside the capacity helper.
-    uint256 private constant MORPHO_VIEW_GAS = 100_000;
+    /// @notice Minimum gas stipend for Morpho view calls in withdraw planning.
+    /// @dev Set above the measured cold-path cost of `convertToAssets` on Base.
+    uint256 public constant MIN_MORPHO_VIEW_GAS = 350_000;
+
+    /// @notice Maximum gas stipend for Morpho view calls in withdraw planning.
+    /// @dev Caps gas forwarded to the external view call.
+    uint256 public constant MAX_MORPHO_VIEW_GAS = 1_000_000;
+
+    /// @dev Aave V3 ReserveConfigurationMap bit positions for active/frozen/paused.
+    uint256 private constant AAVE_CONFIG_ACTIVE_BIT = 56;
+    uint256 private constant AAVE_CONFIG_FROZEN_BIT = 57;
+    uint256 private constant AAVE_CONFIG_PAUSED_BIT = 60;
 
     // ── Immutables ────────────────────────────────────────────────────────────
 
@@ -171,6 +181,12 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///         WalletAlreadyAuthorised() guard that fires afterward.
     mapping(address => uint256) public nonces;
 
+    /// @notice Gas stipend forwarded to `MORPHO_VAULT.convertToAssets`
+    ///         inside `_planWithdrawCapacity`. Initialised to
+    ///         `MIN_MORPHO_VIEW_GAS` and adjustable by the emergency
+    ///         multisig within `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`.
+    uint256 public morphoViewGas;
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     /// @param usdc              USDC address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 on Base).
@@ -211,6 +227,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         DV_USDC            = DvUSDC(dvUsdc);
         EMERGENCY_MULTISIG = emergencyMultisig;
         DEPLOYMENT_TIME    = block.timestamp;
+
+        // Initialise the Morpho view-call gas stipend at the lower bound.
+        morphoViewGas = MIN_MORPHO_VIEW_GAS;
 
         // Pre-approve Aave and Morpho to spend USDC held transiently in this contract.
         // These approvals are max so repeated deposits don't incur extra approve txs.
@@ -291,6 +310,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     function setOperator(address operator, bool approved) external override {
+        if (!authorizedWallets[msg.sender]) revert NotAuthorised();
         if (operator == address(0)) revert ZeroAddress();
         isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
@@ -299,7 +319,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     // ── Core: Deposit ─────────────────────────────────────────────────────────
 
     /// @inheritdoc IDivigentVaultRouter
-    function deposit(uint256 amount, address wallet)
+    function deposit(uint256 amount, address wallet, uint256 minSharesOut)
         external
         override
         nonReentrant
@@ -307,20 +327,22 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         onlyWalletOrOperator(wallet)
         returns (uint256 dvUsdcMinted)
     {
-        dvUsdcMinted = _deposit(amount, wallet);
+        dvUsdcMinted = _deposit(amount, wallet, minSharesOut);
     }
 
     /// @inheritdoc IDivigentVaultRouter
     /// @dev Uses USDC's EIP-2612 permit so no separate approve() tx is needed.
-    ///      The permit signature is validated by the USDC contract — if invalid,
-    ///      the USDC.permit() call reverts before any state change occurs here.
+    ///      The permit signature is best-effort because EIP-2612 permits can be
+    ///      submitted by anyone and therefore frontrun. After the attempt, the
+    ///      router verifies that allowance is sufficient before depositing.
     function depositWithPermit(
         uint256 amount,
         address wallet,
         uint256 deadline,
         uint8   v,
         bytes32 r,
-        bytes32 s
+        bytes32 s,
+        uint256 minSharesOut
     )
         external
         override
@@ -331,13 +353,16 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         if (block.timestamp > deadline) revert PermitExpired();
 
-        // Execute permit: grants this contract allowance from `wallet` for `amount` USDC.
-        // Reverts if signature is invalid, expired, or already used.
-        IERC20Permit(address(USDC)).permit(
+        try IERC20Permit(address(USDC)).permit(
             wallet, address(this), amount, deadline, v, r, s
-        );
+        ) {} catch {}
 
-        dvUsdcMinted = _deposit(amount, wallet);
+        uint256 currentAllowance = USDC.allowance(wallet, address(this));
+        if (currentAllowance < amount) {
+            revert InsufficientPermitAllowance(currentAllowance, amount);
+        }
+
+        dvUsdcMinted = _deposit(amount, wallet, minSharesOut);
     }
 
     // ── Core: Withdraw ────────────────────────────────────────────────────────
@@ -462,8 +487,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // ── Execute: pull from each vault ────────────────────────────────────
         // We intentionally DO NOT wrap the mutating Morpho call in try/catch.
         // If Morpho's view said it could serve `fromMorpho` but the mutating
-        // call reverts (intra-block state change, liquidity race, or a hostile
-        // vault implementation reentering), the revert propagates.
+        // call reverts (intra-block state change, liquidity race, or unexpected
+        // vault behaviour), the revert propagates.
         // The reentrancy guard relies on this bubble-up, and plan/execute
         // capacity drift is rare enough that a simple retry is acceptable.
         if (fromAave > 0) {
@@ -485,10 +510,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // already in the router is excluded from yield and fee calculation.
         uint256 actualGross  = USDC.balanceOf(address(this)) - balanceBefore;
 
-        // Guard: if vault redemptions silently returned 0 (protocol bug, not a
-        // revert), stop here rather than burning dvUSDC for nothing. See
-        // test/SilentFailure.t.sol for the proof that this is exploitable without
-        // this check.
+        // Guard: if vault redemptions silently returned 0 without reverting,
+        // stop here rather than burning dvUSDC for nothing.
         if (actualGross == 0) revert InsufficientVaultLiquidity(grossUSDC, 0);
 
         // Recompute yield from actual gross; floor at 0 — principal is never negative yield
@@ -526,11 +549,14 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     /// @notice Current dvUSDC price in USDC, scaled by 1e18.
-    ///         Starts at 1e18 (1 USDC per dvUSDC) and rises monotonically.
+    ///         Uses the same virtual-offset ratio as mint/burn share math.
     function pricePerShare() external view override returns (uint256) {
-        uint256 supply = DV_USDC.totalSupply();
-        if (supply == 0) return 1e18;
-        return (totalVaultAssets() * 1e18) / supply;
+        return Math.mulDiv(
+            totalVaultAssets() + VIRTUAL_OFFSET,
+            1e18,
+            DV_USDC.totalSupply() + VIRTUAL_OFFSET,
+            Math.Rounding.Floor
+        );
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -603,44 +629,54 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///      for shares, breaking the ">= desiredNetUSDC" guarantee.
     ///
     ///      (1) Loss branch (grossAll <= costBasis):
-    ///            net = gross = s * (A+1) / (S+1)
-    ///            s   = ceil(desiredNet * (S+1) / (A+1))
+    ///            net = gross = s * (A+VIRTUAL_OFFSET) / (S+VIRTUAL_OFFSET)
+    ///            s   = ceil(desiredNet * (S+VIRTUAL_OFFSET) / (A+VIRTUAL_OFFSET))
     ///
     ///      (2) Profit branch (grossAll > costBasis):
     ///            net = gross * (1 - feeBps/bpsDen) + principalOut * (feeBps/bpsDen)
-    ///            s   = desiredNet * bpsDen * walletShares * (S+1)
-    ///                / [ (bpsDen - feeBps) * walletShares * (A+1)
-    ///                  + feeBps * costBasis * (S+1) ]
+    ///            s   = desiredNet * bpsDen * walletShares * (S+VIRTUAL_OFFSET)
+    ///                / [ (bpsDen - feeBps) * walletShares * (A+VIRTUAL_OFFSET)
+    ///                  + feeBps * costBasis * (S+VIRTUAL_OFFSET) ]
     ///
-    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC, and
-    ///      cap at walletShares (position value is a hard ceiling on what can be
-    ///      withdrawn regardless of desiredNet).
+    ///      Both branches round shares UP so actual USDC out >= desiredNetUSDC.
+    ///      If the requested net amount exceeds the wallet's full-position
+    ///      deliverable value, the preview reverts instead of silently returning
+    ///      a clamped quote that would fail `withdraw(..., minUsdcOut)`.
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external
         view
         override
         returns (uint256 dvUsdcShares)
     {
-        if (desiredNetUSDC == 0) return 0;
+        if (desiredNetUSDC == 0) revert ZeroAmount();
 
         uint256 walletShares = DV_USDC.balanceOf(wallet);
-        if (walletShares == 0) return 0;
+        if (walletShares == 0) revert NoPositionToWithdraw();
 
-        uint256 A1        = totalVaultAssets() + VIRTUAL_OFFSET;
-        uint256 S1        = DV_USDC.totalSupply() + VIRTUAL_OFFSET;
+        uint256 totalAssets_ = totalVaultAssets();
+        uint256 totalSupply_ = DV_USDC.totalSupply();
+        uint256 A1           = totalAssets_ + VIRTUAL_OFFSET;
+        uint256 S1           = totalSupply_ + VIRTUAL_OFFSET;
         uint256 costBasis = costBasisUSDC[wallet];
 
         // Loss branch: wallet's total gross <= its costBasis ⇒ no fee on any slice.
-        uint256 grossAll = Math.mulDiv(walletShares, A1, S1, Math.Rounding.Floor);
+        uint256 grossAll = _sharesToAssets(walletShares, totalAssets_, totalSupply_);
+        if (grossAll == 0) revert PositionRoundsToZero();
+
         if (grossAll <= costBasis) {
-            // Degenerate dust case: entire wallet values to 0 USDC (floor).
-            // Any share count — including walletShares — would redeem to 0 gross
-            // and silently under-deliver. Signal "unserviceable" via 0.
-            if (grossAll == 0) return 0;
+            if (desiredNetUSDC > grossAll) {
+                revert UnserviceableNet(desiredNetUSDC, grossAll);
+            }
 
             dvUsdcShares = Math.mulDiv(desiredNetUSDC, S1, A1, Math.Rounding.Ceil);
-            if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
             return dvUsdcShares;
+        }
+
+        uint256 maxYield       = grossAll - costBasis;
+        uint256 maxFee         = FEE_COLLECTOR.calculateFee(maxYield);
+        uint256 maxDeliverable = grossAll - maxFee;
+        if (desiredNetUSDC > maxDeliverable) {
+            revert UnserviceableNet(desiredNetUSDC, maxDeliverable);
         }
 
         // Profit branch: fee applies to (gross - principalOut).
@@ -649,18 +685,25 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
         uint256 denominator = (bpsDenom - feeBps) * walletShares * A1
                             + feeBps * costBasis * S1;
-        if (denominator == 0) return 0;
+        if (denominator == 0) revert PreviewMathDegenerate();
 
-        // Uses OZ Math.mulDiv for 512-bit intermediate precision on the
-        // caller-controlled 4-way numerator. Ceil ensures usdcReturned >= desiredNetUSDC.
+        // Use explicit ceil rounding for the final share quote. The +1 target
+        // absorbs FeeCollector's ceiling-rounded fee so executing the returned
+        // shares does not under-deliver by a single USDC wei. At the full-position
+        // boundary there is no extra deliverable wei, so solve for the exact max.
+        uint256 targetNet = desiredNetUSDC;
+        if (targetNet < maxDeliverable) targetNet += 1;
+
         dvUsdcShares = Math.mulDiv(
-            desiredNetUSDC * bpsDenom,
+            targetNet * bpsDenom,
             walletShares * S1,
             denominator,
             Math.Rounding.Ceil
         );
 
-        if (dvUsdcShares > walletShares) dvUsdcShares = walletShares;
+        if (dvUsdcShares > walletShares) {
+            revert UnserviceableNet(desiredNetUSDC, maxDeliverable);
+        }
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -675,10 +718,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
     /// @inheritdoc IDivigentVaultRouter
     /// @dev Degrades gracefully when Morpho's view path is unreachable
-    ///      (revert or gas bomb). Routes through `_planWithdrawCapacity()`
-    ///      so the same 100k-gas try/catch that guards `withdraw()` also
+    ///      (revert or bounded-gas failure). Routes through `_planWithdrawCapacity()`
+    ///      so the same bounded-gas try/catch that guards `withdraw()` also
     ///      guards this informational view — external integrators can call
-    ///      this without risk of OOG'ing on a compromised Morpho vault.
+    ///      this without exposing the caller to an unbounded Morpho view.
     ///      Callers that need to distinguish "0 Morpho holdings" from
     ///      "Morpho unreachable" should read `withdrawCapacity()` which
     ///      exposes the `morphoReachable` flag.
@@ -702,16 +745,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         (, vaultType, ) = ORACLE.getOptimalVault();
 
-        if (_canAllocate(vaultType, amount)) return vaultType;
-
-        IDivigentYieldOracle.VaultType alternate =
-            vaultType == IDivigentYieldOracle.VaultType.AAVE
-                ? IDivigentYieldOracle.VaultType.MORPHO
-                : IDivigentYieldOracle.VaultType.AAVE;
-
-        if (_canAllocate(alternate, amount)) return alternate;
-
-        revert NoSafeRoute(amount);
+        return _selectDepositRoute(vaultType, amount);
     }
 
     /// @inheritdoc IDivigentVaultRouter
@@ -737,6 +771,24 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     function unpauseDeposits() external override onlyEmergencyMultisig {
         depositsPaused = false;
         emit DepositsPaused(false);
+    }
+
+    /// @inheritdoc IDivigentVaultRouter
+    function setMorphoViewGas(uint256 newGas)
+        external
+        override
+        onlyEmergencyMultisig
+    {
+        if (newGas < MIN_MORPHO_VIEW_GAS || newGas > MAX_MORPHO_VIEW_GAS) {
+            revert MorphoViewGasOutOfBounds(
+                newGas,
+                MIN_MORPHO_VIEW_GAS,
+                MAX_MORPHO_VIEW_GAS
+            );
+        }
+        uint256 oldGas = morphoViewGas;
+        morphoViewGas = newGas;
+        emit MorphoViewGasUpdated(oldGas, newGas);
     }
 
     // ── Emergency Treasury Rotation ──────────────────────────────────────────
@@ -772,10 +824,10 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        shares = amount * (totalSupply + VIRTUAL_OFFSET)
     ///                        / (totalAssets + VIRTUAL_OFFSET)
     ///
-    ///      The virtual offset (+1 to both numerator and denominator) prevents the
-    ///      classic first-depositor inflation attack where an attacker mints 1 share,
-    ///      donates a large amount, then makes a victim's deposit round down to 0 shares.
-    ///      With the offset, the minimum share mint is 1 regardless of pool state.
+    ///      The virtual offset acts as a 1-USDC / 1-dvUSDC virtual seed. This
+    ///      preserves 1:1 genesis minting while keeping early share resolution
+    ///      high enough that donation-based inflation cannot cheaply force
+    ///      ordinary deposits into zero-share or large floor-loss outcomes.
     ///
     ///      Rounding: floor (in vault's favour) to prevent share inflation.
     function _assetsToShares(
@@ -793,7 +845,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        assets = shares * (totalAssets + VIRTUAL_OFFSET)
     ///                        / (totalSupply + VIRTUAL_OFFSET)
     ///
-    ///      Rounding: floor (in vault's favour).
+    ///      Rounding: floor (in vault's favour). The result is capped at
+    ///      totalAssets so virtual assets cannot overstate redemption value
+    ///      after an underlying loss.
     function _sharesToAssets(
         uint256 shares,
         uint256 totalAssets_,
@@ -801,6 +855,46 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ) internal pure returns (uint256 assets) {
         assets = (shares * (totalAssets_ + VIRTUAL_OFFSET))
                / (totalSupply_ + VIRTUAL_OFFSET);
+        if (assets > totalAssets_) assets = totalAssets_;
+    }
+
+    // ── Internal: Deposit Routing Gates ───────────────────────────────────────
+
+    /// @dev Selects the deposit target by applying both route gates:
+    ///      oracle safety (`isVaultSafe`) and amount-specific capacity
+    ///      (`_canAllocate`). The oracle-recommended vault is tried first; the
+    ///      alternate is only eligible if it independently passes both gates.
+    function _selectDepositRoute(
+        IDivigentYieldOracle.VaultType recommended,
+        uint256 amount
+    ) internal view returns (IDivigentYieldOracle.VaultType vaultType) {
+        if (_canRouteDeposit(recommended, amount)) return recommended;
+
+        IDivigentYieldOracle.VaultType alternate =
+            recommended == IDivigentYieldOracle.VaultType.AAVE
+                ? IDivigentYieldOracle.VaultType.MORPHO
+                : IDivigentYieldOracle.VaultType.AAVE;
+
+        if (_canRouteDeposit(alternate, amount)) return alternate;
+
+        revert NoSafeRoute(amount);
+    }
+
+    /// @dev `_canAllocate` is capacity-only. This wrapper binds that capacity
+    ///      check to the oracle's current safety advisory so fallback routing
+    ///      cannot land in a vault the oracle has marked unsafe. If the oracle's
+    ///      safety read itself fails, treat the route as unsafe.
+    function _canRouteDeposit(
+        IDivigentYieldOracle.VaultType vaultType,
+        uint256 amount
+    ) internal view returns (bool) {
+        if (!_canAllocate(vaultType, amount)) return false;
+
+        try ORACLE.isVaultSafe(vaultType) returns (bool safe) {
+            return safe;
+        } catch {
+            return false;
+        }
     }
 
     // ── Internal: Amount-Aware Vault Capacity ─────────────────────────────────
@@ -829,6 +923,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         uint256 amount
     ) internal view returns (bool) {
         if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
+            if (!_isAaveSupplyEnabled()) return false;
             return USDC.balanceOf(address(A_TOKEN)) >= amount;
         } else {
             // ROUTING-SAFE: a Morpho view revert (pause, unexpected state) is
@@ -843,6 +938,32 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         }
     }
 
+    // ── Internal: Aave Reserve Health ──────────────────────────────────────────
+
+    /// @dev Reads Aave V3 reserve flags for USDC. If the pool view reverts,
+    ///      treat Aave as unavailable so deposits/withdrawals can route elsewhere.
+    function _readAaveConfig() internal view returns (bool active, bool frozen, bool paused) {
+        try AAVE_POOL.getConfiguration(address(USDC)) returns (uint256 configuration) {
+            active = ((configuration >> AAVE_CONFIG_ACTIVE_BIT) & 1) == 1;
+            frozen = ((configuration >> AAVE_CONFIG_FROZEN_BIT) & 1) == 1;
+            paused = ((configuration >> AAVE_CONFIG_PAUSED_BIT) & 1) == 1;
+        } catch {
+            active = false;
+            frozen = false;
+            paused = false;
+        }
+    }
+
+    function _isAaveSupplyEnabled() internal view returns (bool) {
+        (bool active, bool frozen, bool paused) = _readAaveConfig();
+        return active && !frozen && !paused;
+    }
+
+    function _isAaveWithdrawEnabled() internal view returns (bool) {
+        (bool active, , bool paused) = _readAaveConfig();
+        return active && !paused;
+    }
+
     // ── Internal: Deposit Logic ───────────────────────────────────────────────
 
     /// @dev Shared implementation for deposit() and depositWithPermit().
@@ -853,15 +974,15 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     ///        3. Trigger oracle update (permissionless, skipped if too recent).
     ///        4. Verify oracle is fresh (reverts StaleOracle if > 2 hours stale).
     ///        5. Query oracle for optimal vault.
-    ///        6. Check amount-aware vault capacity (_canAllocate); try alternate if needed.
-    ///           Reverts NoSafeRoute(amount) if both vaults lack capacity.
+    ///        6. Check oracle safety and amount-aware vault capacity; try alternate if needed.
+    ///           Reverts NoSafeRoute(amount) if neither vault passes both gates.
     ///        7. Supply USDC to the selected vault.
     ///        8. Mint dvUSDC shares to wallet.
     ///        9. Update cost basis.
     ///
     ///      [INV-4]: USDC arrives in this contract at step 2, departs at step 7.
     ///               After step 7, USDC.balanceOf(address(this)) == 0.
-    function _deposit(uint256 amount, address wallet)
+    function _deposit(uint256 amount, address wallet, uint256 minSharesOut)
         internal
         returns (uint256 dvUsdcMinted)
     {
@@ -893,19 +1014,8 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
         ) = ORACLE.getOptimalVault();
 
-        // Amount-aware capacity check: if the primary vault can't accommodate `amount`,
-        // fall back to the alternate vault; if neither can, revert NoSafeRoute.
-        if (!_canAllocate(vaultType, amount)) {
-            IDivigentYieldOracle.VaultType alternate =
-                vaultType == IDivigentYieldOracle.VaultType.AAVE
-                    ? IDivigentYieldOracle.VaultType.MORPHO
-                    : IDivigentYieldOracle.VaultType.AAVE;
-
-            if (!_canAllocate(alternate, amount)) {
-                revert NoSafeRoute(amount);
-            }
-            vaultType = alternate;
-        }
+        // Select a route that passes both oracle safety and amount capacity.
+        vaultType = _selectDepositRoute(vaultType, amount);
 
         // Route USDC to the selected vault
         // [INV-4]: After supply call, USDC.balanceOf(this) == 0
@@ -922,6 +1032,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         dvUsdcMinted = _assetsToShares(amount, totalAssetsBefore, totalSupplyBefore);
 
         if (dvUsdcMinted == 0) revert ZeroAmount();
+        if (dvUsdcMinted < minSharesOut) {
+            revert SlippageExceeded(dvUsdcMinted, minSharesOut);
+        }
 
         DV_USDC.mint(wallet, dvUsdcMinted);
 
@@ -969,16 +1082,18 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     {
         cap.aaveAssetsHeld    = A_TOKEN.balanceOf(address(this));
         cap.aaveIdleLiquidity = USDC.balanceOf(address(A_TOKEN));
-        cap.aaveWithdrawCap   = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
-            ? cap.aaveAssetsHeld
-            : cap.aaveIdleLiquidity;
+        if (_isAaveWithdrawEnabled()) {
+            cap.aaveWithdrawCap = cap.aaveAssetsHeld < cap.aaveIdleLiquidity
+                ? cap.aaveAssetsHeld
+                : cap.aaveIdleLiquidity;
+        }
 
         uint256 morphoShares = MORPHO_VAULT.balanceOf(address(this));
         if (morphoShares == 0) {
             // No exposure — vacuously reachable.
             cap.morphoReachable = true;
         } else {
-            try MORPHO_VAULT.convertToAssets{gas: MORPHO_VIEW_GAS}(morphoShares)
+            try MORPHO_VAULT.convertToAssets{gas: morphoViewGas}(morphoShares)
                 returns (uint256 assets)
             {
                 cap.morphoAssetsHeld = assets;

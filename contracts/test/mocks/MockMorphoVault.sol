@@ -31,11 +31,13 @@ contract MockMorphoVault {
     ///      infinite loop, exercising the try/catch gas-limit path.
     bool public revertOnConvertToAssets;
     bool public gasBombConvertToAssets;
+    uint256 public gasToBurnInConvertToAssets;
 
     function setSilentFailWithdraw(bool fail) external { silentFailWithdraw = fail; }
     function setSilentFailDeposit(bool fail) external { silentFailDeposit = fail; }
     function setRevertOnConvertToAssets(bool fail) external { revertOnConvertToAssets = fail; }
     function setGasBombConvertToAssets(bool bomb) external { gasBombConvertToAssets = bomb; }
+    function setGasToBurnInConvertToAssets(uint256 amount) external { gasToBurnInConvertToAssets = amount; }
 
     /// @notice Arm the drift hook. View calls (`maxWithdraw`, `totalAssets`)
     ///         still return the pre-drift state, so the router plans based
@@ -81,8 +83,13 @@ contract MockMorphoVault {
         if (revertOnConvertToAssets) revert("MockMorphoVault: convertToAssets disabled");
         if (gasBombConvertToAssets) {
             // Burn gas until the try/catch ceiling is hit, forcing the caller's
-            // catch branch to execute. Used to test `MORPHO_VIEW_GAS` bounds.
+            // catch branch to execute. Used to test `morphoViewGas` bounds.
             while (true) {}
+        }
+        if (gasToBurnInConvertToAssets > 0) {
+            uint256 startGas = gasleft();
+            while (startGas - gasleft() < gasToBurnInConvertToAssets) {
+            }
         }
         return _sharesToAssets(shares);
     }

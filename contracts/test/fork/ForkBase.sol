@@ -105,7 +105,7 @@ abstract contract ForkBase is Test, BaseAddresses {
     function _deposit(address user, uint256 amount) internal returns (uint256 shares) {
         vm.startPrank(user);
         usdc.approve(address(router), amount);
-        shares = router.deposit(amount, user);
+        shares = router.deposit(amount, user, 0);
         vm.stopPrank();
     }
 

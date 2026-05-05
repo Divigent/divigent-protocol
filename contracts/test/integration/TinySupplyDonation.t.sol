@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Actions} from "./helpers/Actions.sol";
+import {IDivigentVaultRouter} from "../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title  Tiny Supply + Huge Donation
 /// @notice Pins the first-depositor inflation defence and the behaviour of
@@ -9,7 +10,7 @@ import {Actions} from "./helpers/Actions.sol";
 ///         a very small `totalSupply` paired with a very large donation
 ///         (aToken mint, direct Morpho `accrueYield`, etc.).
 ///
-///         Without the virtual offset (`VIRTUAL_OFFSET = 1`) in the share
+///         Without a meaningful virtual offset in the share
 ///         maths, an attacker could:
 ///           1. Deposit 1 wei (gets 1 share).
 ///           2. Donate 1e18 USDC directly to the router's aToken balance.
@@ -18,7 +19,8 @@ import {Actions} from "./helpers/Actions.sol";
 ///              principal.
 ///
 ///         The router's defence is twofold:
-///           - `VIRTUAL_OFFSET` breaks the exact division-by-zero trap
+///           - `VIRTUAL_OFFSET` raises the donation cost needed to force
+///             zero-share or large floor-loss deposit outcomes.
 ///             (victim always gets at least 1 share).
 ///           - The attack is NOT PROFITABLE: the attacker sacrifices the
 ///             donation, which goes into the vault's PPS and benefits every
@@ -115,9 +117,9 @@ contract TinySupplyDonationTest is Actions {
         victimCapitalBefore;
     }
 
-    /// @notice `previewWithdrawNet` must not revert under large donations.
-    ///         Complements finding R5's top-down scale check with a
-    ///         bottom-up one (tiny supply + huge assets).
+    /// @notice `previewWithdrawNet` must not revert under large donations for
+    ///         serviceable requests. Impossible requests fail with typed max
+    ///         deliverable data instead of silently clamping to wallet shares.
     function test_previewWithdrawNet_tinySupplyHugeAssets_doesNotOverflow() public {
         address seeder = makeActor("tiny_preview_seeder", 100_000e6);
 
@@ -132,7 +134,15 @@ contract TinySupplyDonationTest is Actions {
         uint256 shares = router.previewWithdrawNet(1e6, seeder);
         assertGt(shares, 0, "preview returns non-zero for small request");
 
-        uint256 sharesAtMax = router.previewWithdrawNet(type(uint128).max, seeder);
-        assertLe(sharesAtMax, dvUsdc.balanceOf(seeder), "preview caps at wallet shares");
+        uint256 walletShares = dvUsdc.balanceOf(seeder);
+        uint256 maxDeliverable = router.previewRedeem(walletShares, seeder);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.UnserviceableNet.selector,
+                type(uint128).max,
+                maxDeliverable
+            )
+        );
+        router.previewWithdrawNet(type(uint128).max, seeder);
     }
 }

@@ -62,6 +62,11 @@ interface IDivigentVaultRouter {
     /// @notice Emitted when deposit pause state changes.
     event DepositsPaused(bool paused);
 
+    /// @notice Emitted when the emergency multisig adjusts the gas stipend
+    ///         forwarded to `MORPHO_VAULT.convertToAssets` inside the
+    ///         router's withdraw-planning helper.
+    event MorphoViewGasUpdated(uint256 oldGas, uint256 newGas);
+
     /// @notice Emitted when a withdrawal's proportional split was rebalanced
     ///         because one vault's effective capacity was below its target slice.
     ///         `shortLeg` identifies which vault was short: true = Morpho short,
@@ -88,6 +93,11 @@ interface IDivigentVaultRouter {
     error NotEmergencyMultisig();
     error WalletAlreadyAuthorised();
     error PermitExpired();
+    error InsufficientPermitAllowance(uint256 currentAllowance, uint256 required);
+    error NoPositionToWithdraw();
+    error PositionRoundsToZero();
+    error PreviewMathDegenerate();
+    error UnserviceableNet(uint256 desiredNetUSDC, uint256 maxDeliverable);
     error InvalidAmount();
     error SlippageExceeded(uint256 received, uint256 minExpected);
     error InvalidSignature();
@@ -103,10 +113,9 @@ interface IDivigentVaultRouter {
     error ZeroDvUsdc();
     error ZeroEmergencyMultisig();
 
-    /// @notice Reverts when neither vault can accommodate the requested deposit amount.
-    ///         This may occur when Aave has insufficient available liquidity AND Morpho's
-    ///         maxDeposit is below the requested amount. The depositor should retry with
-    ///         a smaller amount or wait for liquidity conditions to improve.
+    /// @notice Reverts when neither vault is both oracle-safe and able to
+    ///         accommodate the requested deposit amount. This may occur when
+    ///         capacity is unavailable or the oracle marks one or both routes unsafe.
     error NoSafeRoute(uint256 amount);
 
     /// @notice Reverts on withdrawal when Aave's redeemable cash plus Morpho's
@@ -131,6 +140,13 @@ interface IDivigentVaultRouter {
     ///         next withdraw for a Morpho-touching wallet will revert with
     ///         this error.
     error MorphoUnreachable();
+
+    /// @notice Reverts when the proposed Morpho view-call gas stipend is
+    ///         outside `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`.
+    /// @param  provided The proposed gas value.
+    /// @param  min      The protocol-enforced lower bound (inclusive).
+    /// @param  max      The protocol-enforced upper bound (inclusive).
+    error MorphoViewGasOutOfBounds(uint256 provided, uint256 min, uint256 max);
 
     // ── Authorisation ─────────────────────────────────────────────────────────
 
@@ -169,10 +185,11 @@ interface IDivigentVaultRouter {
     ///         minting dvUSDC receipt tokens back to `wallet`.
     ///         Caller must be `wallet` itself or an authorised operator for `wallet`.
     ///         `wallet` must have pre-approved the router for at least `amount` USDC.
-    /// @param amount  USDC amount to deposit (6 decimals).
-    /// @param wallet  Agent wallet address (receives dvUSDC).
+    /// @param amount       USDC amount to deposit (6 decimals).
+    /// @param wallet       Agent wallet address (receives dvUSDC).
+    /// @param minSharesOut Minimum dvUSDC shares to mint; reverts if slippage exceeded.
     /// @return dvUsdcMinted Number of dvUSDC tokens minted.
-    function deposit(uint256 amount, address wallet)
+    function deposit(uint256 amount, address wallet, uint256 minSharesOut)
         external
         returns (uint256 dvUsdcMinted);
 
@@ -184,6 +201,7 @@ interface IDivigentVaultRouter {
     /// @param v        ECDSA signature component v.
     /// @param r        ECDSA signature component r.
     /// @param s        ECDSA signature component s.
+    /// @param minSharesOut Minimum dvUSDC shares to mint; reverts if slippage exceeded.
     /// @return dvUsdcMinted Number of dvUSDC tokens minted.
     function depositWithPermit(
         uint256 amount,
@@ -191,7 +209,8 @@ interface IDivigentVaultRouter {
         uint256 deadline,
         uint8   v,
         bytes32 r,
-        bytes32 s
+        bytes32 s,
+        uint256 minSharesOut
     ) external returns (uint256 dvUsdcMinted);
 
     /// @notice Redeems `shares` dvUSDC from `wallet`, withdrawing USDC from the
@@ -255,10 +274,11 @@ interface IDivigentVaultRouter {
 
     /// @notice Preview how many dvUSDC shares must be redeemed to receive at least
     ///         `desiredNetUSDC` after the yield fee is deducted.
-    ///         Rounds up to ensure the user receives at least the requested amount.
+    ///         Rounds up to ensure the user receives at least the requested amount;
+    ///         reverts when the requested net amount is not serviceable.
     /// @param desiredNetUSDC Target net USDC after fee (6 decimals).
     /// @param wallet         Wallet whose cost basis is used for fee computation.
-    /// @return dvUsdcShares  Shares to redeem (capped at wallet's balance).
+    /// @return dvUsdcShares  Shares to redeem.
     function previewWithdrawNet(uint256 desiredNetUSDC, address wallet)
         external view returns (uint256 dvUsdcShares);
 
@@ -279,10 +299,9 @@ interface IDivigentVaultRouter {
     /// @notice Safe pre-flight view for withdraw planning. Returns the
     ///         router's current exit capacity decomposed per vault.
     ///
-    ///         Never reverts. If Morpho's view path is failing (vault
-    ///         upgrade, compromised allocator, gas-bomb), the call still
-    ///         returns with `morphoReachable = false` and Morpho fields
-    ///         zeroed. Callers can compare `totalWithdrawCap` against a
+    ///         Never reverts. If Morpho's view path is unavailable, the
+    ///         call still returns with `morphoReachable = false` and Morpho
+    ///         fields zeroed. Callers can compare `totalWithdrawCap` against a
     ///         desired gross and decide whether to submit the withdraw
     ///         tx — avoiding wasted gas on a predictable revert.
     ///
@@ -293,8 +312,8 @@ interface IDivigentVaultRouter {
     function withdrawCapacity() external view returns (VaultCapacity memory);
 
     /// @notice Returns the oracle's recommended vault for a given deposit amount,
-    ///         accounting for amount-aware capacity checks.
-    ///         Reverts with NoSafeRoute if neither vault can accommodate `amount`.
+    ///         accounting for oracle safety and amount-aware capacity checks.
+    ///         Reverts with NoSafeRoute if neither vault passes both gates.
     /// @param amount USDC amount to route.
     /// @return vaultType Recommended VaultType (AAVE or MORPHO).
     function getRecommendedRoute(uint256 amount)
@@ -315,6 +334,14 @@ interface IDivigentVaultRouter {
     /// @notice Resumes deposits after a pause.
     ///         Only callable by the immutable emergency multisig.
     function unpauseDeposits() external;
+
+    /// @notice Update the gas stipend forwarded to Morpho's `convertToAssets`
+    ///         view inside the router's withdraw-planning helper. Bounded by
+    ///         `[MIN_MORPHO_VIEW_GAS, MAX_MORPHO_VIEW_GAS]`. Reverts with
+    ///         `MorphoViewGasOutOfBounds` outside that range. Only callable
+    ///         by the immutable emergency multisig.
+    /// @param newGas The new gas stipend (inclusive of bounds).
+    function setMorphoViewGas(uint256 newGas) external;
 
     // ── Emergency Treasury Rotation (multisig only, timelocked) ───────────────
 

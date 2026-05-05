@@ -29,7 +29,8 @@ interface IDivigentYieldOracle {
     // ── View ──────────────────────────────────────────────────────────────────
 
     /// @notice Returns the optimal vault for new deposits, using TWAR rates.
-    ///         Falls back to Aave V3 if Morpho fails the safety check.
+    ///         Falls back to Aave V3 only when Aave also passes its safety check.
+    ///         Reverts if neither supported vault is currently safe.
     /// @return vault     Address of the recommended vault (Aave Pool or Morpho vault).
     /// @return vaultType Enum indicating AAVE or MORPHO.
     /// @return twarRate  The TWAR APY of the recommended vault, in ray (1e27).

@@ -77,7 +77,9 @@ contract DivigentYieldOracleTest is TestBase {
         uint256 expectedTimestamp = block.timestamp + elapsed;
         uint256 expectedAaveRate = 8e25;
         uint256 expectedSharePrice = 1_001_000;
-        uint256 expectedMorphoRate = _expectedMorphoRate(1_000_000, expectedSharePrice, elapsed);
+        uint256 expectedSampledSharePrice = _sampledSharePrice(expectedSharePrice);
+        uint256 expectedMorphoRate =
+            _expectedMorphoRate(_sampledSharePrice(1_000_000), expectedSampledSharePrice, elapsed);
 
         aavePool.setCurrentLiquidityRate(uint128(expectedAaveRate));
         morphoVault.setSharePrice(expectedSharePrice);
@@ -92,7 +94,7 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(yieldOracle.morphoCumulative(), 0, "Morpho cumulative should still be zero on first observation");
         assertEq(yieldOracle.aaveSpotRate(), expectedAaveRate, "Aave spot rate update mismatch");
         assertEq(yieldOracle.morphoSpotRate(), expectedMorphoRate, "Morpho spot rate update mismatch");
-        assertEq(yieldOracle.lastMorphoSharePrice(), expectedSharePrice, "Morpho share price update mismatch");
+        assertEq(yieldOracle.lastMorphoSharePrice(), expectedSampledSharePrice, "Morpho share price update mismatch");
         assertEq(yieldOracle.lastObservationTime(), expectedTimestamp, "Observation time update mismatch");
     }
 
@@ -325,7 +327,7 @@ contract DivigentYieldOracleTest is TestBase {
     }
 
     function test_isVaultSafe_morphoAtParIsSafe() public {
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT());
+        morphoVault.setSharePrice(1_000_000);
         assertTrue(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Morpho at par should be safe");
     }
 
@@ -360,7 +362,7 @@ contract DivigentYieldOracleTest is TestBase {
     }
 
     function test_getOptimalVault_returnsAaveWhenMorphoIsUnsafe() public {
-        morphoVault.setSharePrice(yieldOracle.SHARE_UNIT() - 1);
+        morphoVault.setSharePrice(999_999);
 
         (address vault, IDivigentYieldOracle.VaultType vaultType, uint256 twarRate) = yieldOracle.getOptimalVault();
 
@@ -657,21 +659,18 @@ contract DivigentYieldOracleTest is TestBase {
     // NEW: getOptimalVault edge cases
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function test_getOptimalVault_returnsAaveEvenWhenBothVaultsUnsafe() public {
+    function test_getOptimalVault_revertsWhenBothVaultsUnsafe() public {
         // Aave at >90% utilization (unsafe per oracle heuristic)
         _setAaveUtilization(100e6, 5e6); // only 5% available
         // Morpho share price below 1 USDC (unsafe)
         morphoVault.setSharePrice(999_999);
 
-        (address vault, IDivigentYieldOracle.VaultType vaultType,) = yieldOracle.getOptimalVault();
-
-        // Oracle returns Aave even though its own _isVaultSafe(AAVE) = false
-        assertEq(vault, address(aavePool), "Both unsafe: oracle still returns Aave");
-        assertEq(uint256(vaultType), uint256(IDivigentYieldOracle.VaultType.AAVE));
-
         // Prove Aave IS unsafe by the oracle's own standard
         assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.AAVE), "Aave should be unsafe");
         assertFalse(yieldOracle.isVaultSafe(IDivigentYieldOracle.VaultType.MORPHO), "Morpho should be unsafe");
+
+        vm.expectRevert(DivigentYieldOracle.NoSafeVault.selector);
+        yieldOracle.getOptimalVault();
     }
 
     function test_getOptimalVault_morphoDifferentialExactlyAtThreshold() public {
@@ -839,58 +838,65 @@ contract DivigentYieldOracleTest is TestBase {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Audit: Morpho rate truncation at low SHARE_UNIT precision
+    // Audit: Morpho rate truncation at low share-price probe precision
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @dev With SHARE_UNIT = 1e18, per-interval share price deltas no longer
-    ///      truncate to 0 at realistic APYs. The 1e12 extra precision (vs 1e6)
-    ///      resolves the truncation concern entirely.
-    function test_audit_noTruncationAt5PctAPY_withShareUnit1e18() public {
-        uint256 SU = yieldOracle.SHARE_UNIT();
+    /// @dev Per-interval share-price deltas remain visible at realistic APYs.
+    function test_audit_noTruncationAt5PctAPY_withHighPrecisionProbe() public {
         uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
+        uint256 totalShares = 1_000_000e18;
+        uint256 startingAssets = 1_000_000e6;
 
         uint128 aaveRate = 0.03e27; // 3%
         uint256 morphoBps = 500; // 5%
 
-        // Per-interval delta is now non-zero with 1e18 precision
-        uint256 rawDelta = (SU * morphoBps * interval) / (10_000 * SPY);
-        assertGt(rawDelta, 0, "1e18 SHARE_UNIT prevents per-interval truncation");
+        morphoVault.setTotalShares(totalShares);
+        morphoVault.setTotalAssets(startingAssets);
+        morphoVault.clearManualSharePrice();
 
         for (uint256 i = 1; i <= 48; i++) {
-            uint256 growth = (SU * morphoBps * (i * interval)) / (10_000 * SPY);
-            _recordObservationAfter(interval, aaveRate, SU + growth);
+            uint256 growth = (startingAssets * morphoBps * (i * interval)) / (10_000 * SPY);
+            aavePool.setCurrentLiquidityRate(aaveRate);
+            morphoVault.setTotalAssets(startingAssets + growth);
+            vm.warp(block.timestamp + interval);
+            yieldOracle.recordObservation();
+            assertGt(yieldOracle.morphoSpotRate(), 0, "Morpho rate is non-zero at 5% APY");
         }
-
-        // Every observation produces a non-zero rate
-        assertGt(yieldOracle.morphoSpotRate(), 0, "Morpho rate is non-zero at 5% APY");
 
         vm.warp(block.timestamp + interval);
         (address vault,,) = yieldOracle.getOptimalVault();
         assertEq(vault, address(morphoVault), "5% Morpho beats 3% Aave");
     }
 
-    /// @dev Even at very low APY (0.7%), SHARE_UNIT = 1e18 provides enough
-    ///      precision for every observation to register a non-zero rate.
-    function test_audit_noTruncationAt07PctAPY_withShareUnit1e18() public {
-        uint256 SU = yieldOracle.SHARE_UNIT();
+    /// @dev Even at very low APY (0.7%), the probe is large enough for
+    ///      every observation to register a non-zero rate.
+    function test_audit_noTruncationAt07PctAPY_withHighPrecisionProbe() public {
         uint256 SPY = yieldOracle.SECONDS_PER_YEAR();
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
+        uint256 totalShares = 1_000_000e18;
+        uint256 startingAssets = 1_000_000e6;
 
         uint128 aaveRate = 0.001e27; // 0.1%
         uint256 morphoBps = 70; // 0.7%
 
+        morphoVault.setTotalShares(totalShares);
+        morphoVault.setTotalAssets(startingAssets);
+        morphoVault.clearManualSharePrice();
+
         uint256 zeroCount;
         for (uint256 i = 1; i <= 48; i++) {
-            uint256 growth = (SU * morphoBps * (i * interval)) / (10_000 * SPY);
-            _recordObservationAfter(interval, aaveRate, SU + growth);
+            uint256 growth = (startingAssets * morphoBps * (i * interval)) / (10_000 * SPY);
+            aavePool.setCurrentLiquidityRate(aaveRate);
+            morphoVault.setTotalAssets(startingAssets + growth);
+            vm.warp(block.timestamp + interval);
+            yieldOracle.recordObservation();
             if (yieldOracle.morphoSpotRate() == 0) zeroCount++;
         }
 
-        // With 1e18 precision, zero-rate observations should be rare or none
-        assertLe(zeroCount, 5, "few or no zero-rate observations at 0.7% APY with 1e18 precision");
+        assertEq(zeroCount, 0, "every observation should register at 0.7% APY");
 
-        // Despite heavy quantization, Morpho should still clear the hurdle here.
+        // With the larger probe, Morpho should still clear the hurdle here.
         vm.warp(block.timestamp + interval);
         (address vault, IDivigentYieldOracle.VaultType vt,) = yieldOracle.getOptimalVault();
         assertEq(vault, address(morphoVault), "Morpho@0.7% should still beat Aave@0.1%");
@@ -992,9 +998,12 @@ contract DivigentYieldOracleTest is TestBase {
         yieldOracle.recordObservation();
     }
 
+    function _sampledSharePrice(uint256 sharePrice) internal view returns (uint256) {
+        return sharePrice * yieldOracle.SHARE_UNIT() / 1e18;
+    }
+
     function _setAaveUtilization(uint256 totalAToken, uint256 availableUsdc) internal {
         aToken.setBalance(address(this), totalAToken);
         usdc.setBalance(address(aToken), availableUsdc);
     }
 }
-

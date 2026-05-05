@@ -54,25 +54,27 @@ contract StrayUsdcExclusionTest is Actions {
         vm.prank(user);
         uint256 returned = router.withdraw(shares, user, 0);
 
-        // Fee is exactly 10% of vault yield (1000e6 / 10 = 100e6), NOT 10%
-        // of (yield + stray). The delta-based `actualGross` absorbs stray.
+        // Fee is exactly 10% of realised vault yield, NOT 10% of
+        // (yield + stray). The delta-based `actualGross` absorbs stray, while
+        // the virtual offset retains a small slice of the vault yield.
         uint256 feeCharged = usdc.balanceOf(treasury) - treasuryBefore;
-        assertApproxEqAbs(feeCharged, YIELD / 10, 2, "fee must be 10% of vault yield, not of yield + stray");
+        uint256 actualGross = returned + feeCharged;
+        uint256 realisedYield = actualGross - DEPOSIT;
+        uint256 residualBound = (YIELD * 1e6) / (DEPOSIT + 1e6) + 4;
+
+        assertLe(realisedYield, YIELD, "realised yield cannot include stray USDC");
+        assertGe(realisedYield + residualBound, YIELD, "virtual residual is bounded");
+        assertEq(feeCharged, expectedFee(realisedYield), "fee must be 10% of realised vault yield");
 
         // User receives: principal + 90% of vault yield only — the stray
         // USDC stays in the router.
-        uint256 expectedNet = DEPOSIT + (YIELD - YIELD / 10);
-        assertApproxEqAbs(returned, expectedNet, 2, "user nets principal + 90% of vault yield");
+        uint256 expectedNet = DEPOSIT + (realisedYield - feeCharged);
+        assertEq(returned, expectedNet, "user nets principal + realised yield after fee");
 
         // The stray USDC REMAINS in the router. A follow-up rescue pathway
         // (governance, multisig) would be required to recover it — but it
         // is never silently credited to a user or the treasury.
-        assertApproxEqAbs(
-            usdc.balanceOf(address(router)),
-            STRAY,
-            2,
-            "stray USDC remains in router after withdraw"
-        );
+        assertApproxEqAbs(usdc.balanceOf(address(router)), STRAY, 2, "stray USDC remains in router after withdraw");
     }
 
     /// @notice Even with zero vault yield, stray USDC in the router must not

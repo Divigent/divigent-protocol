@@ -58,14 +58,16 @@ contract LossDistributionTest is Actions {
         assertLt(aliceLossSnap.currentValue, aliceDeposit, "Alice: currentValue < costBasis");
         assertLt(bobLossSnap.currentValue, bobDeposit, "Bob:   currentValue < costBasis");
 
-        // The combined currentValue should equal totalVaultAssets within rounding
-        // (proves the loss is shared proportionally via PPS, not lopsided).
+        // The combined currentValue should equal totalVaultAssets modulo the
+        // virtual share's loss-state drift (proves the loss is shared
+        // proportionally via PPS, not lopsided).
         ProtocolSnap memory protoLoss = snapProtocol();
         assertEq(protoLoss.totalVaultAssets, aaveAfter, "Pool's totalVaultAssets reflects the write-down exactly");
+        uint256 virtualLossDrift = (lossAmount * 1e6) / (totalDeposit + 1e6) + 4;
         assertApproxEqAbs(
             aliceLossSnap.currentValue + bobLossSnap.currentValue,
             aaveAfter,
-            2,
+            virtualLossDrift,
             "Sum of users' currentValue == totalVaultAssets (proportional sharing)"
         );
 
@@ -81,7 +83,9 @@ contract LossDistributionTest is Actions {
         // Alice's partial return reflects the proportional loss. Half her shares
         // at PPS ≈ 0.8 → expect roughly $24k (40% of $60k) for $30k of nominal principal.
         uint256 expectedPartial = (aliceDeposit / 2) * (totalDeposit - lossAmount) / totalDeposit;
-        assertApproxEqAbs(alicePartial, expectedPartial, 4, "Alice's partial return reflects proportional loss");
+        assertApproxEqAbs(
+            alicePartial, expectedPartial, virtualLossDrift, "Alice's partial return reflects proportional loss"
+        );
 
         // ─── Alice fully exits ──────────────────────────────────────────────
 
@@ -94,7 +98,10 @@ contract LossDistributionTest is Actions {
         uint256 aliceTotal = alicePartial + aliceFinal;
         uint256 expectedAliceTotal = (aliceDeposit * (totalDeposit - lossAmount)) / totalDeposit;
         assertApproxEqAbs(
-            aliceTotal, expectedAliceTotal, 4, "Alice's total return == her proportional share of post-loss pool"
+            aliceTotal,
+            expectedAliceTotal,
+            virtualLossDrift,
+            "Alice's total return == her proportional share of post-loss pool"
         );
 
         // ─── Bob's position unchanged by Alice's exits ──────────────────────
@@ -118,7 +125,9 @@ contract LossDistributionTest is Actions {
         assertEq(usdc.balanceOf(treasury), treasuryBefore, "Final: treasury collected nothing on the loss");
 
         uint256 expectedBobTotal = (bobDeposit * (totalDeposit - lossAmount)) / totalDeposit;
-        assertApproxEqAbs(bobReturn, expectedBobTotal, 4, "Bob's return == his proportional share of post-loss pool");
+        assertApproxEqAbs(
+            bobReturn, expectedBobTotal, virtualLossDrift, "Bob's return == his proportional share of post-loss pool"
+        );
 
         // ─── Conservation: users + treasury == totalDeposit - lossAmount ────
 
@@ -126,13 +135,16 @@ contract LossDistributionTest is Actions {
         uint256 totalToTreasury = usdc.balanceOf(treasury) - treasuryBefore;
         assertEq(totalToTreasury, 0, "Conservation: zero fee under loss");
         assertApproxEqAbs(
-            totalReturned, totalDeposit - lossAmount, 8, "Conservation: users recovered exactly post-loss pool value"
+            totalReturned,
+            totalDeposit - lossAmount,
+            virtualLossDrift,
+            "Conservation: users recovered post-loss pool value within virtual drift"
         );
 
         // ─── Cleanup ────────────────────────────────────────────────────────
 
         assertEq(dvUsdc.totalSupply(), 0, "All shares burned");
         assertEq(usdc.balanceOf(address(router)), 0, "Router holds no USDC (INV-4)");
-        assertLe(aToken.balanceOf(address(router)), 4, "aToken dust <= 4 wei");
+        assertLe(aToken.balanceOf(address(router)), virtualLossDrift, "aToken residual within virtual drift");
     }
 }

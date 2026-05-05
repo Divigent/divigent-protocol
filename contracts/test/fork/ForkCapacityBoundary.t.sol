@@ -81,7 +81,7 @@ contract ForkCapacityBoundaryTest is ForkBase {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectPartialRevert(IDivigentVaultRouter.NoSafeRoute.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -157,7 +157,8 @@ contract ForkCapacityBoundaryTest is ForkBase {
         uint256 aaveIdle = usdc.balanceOf(BASE_AAVE_ATOKEN_USDC);
         uint256 totalHeld = aaveBefore + morphoAssets;
         uint256 totalSupply = dvUsdc.totalSupply();
-        uint256 grossEstimate = (shares * (totalHeld + 1)) / (totalSupply + 1);
+        uint256 virtualOffset = 1e6;
+        uint256 grossEstimate = (shares * (totalHeld + virtualOffset)) / (totalSupply + virtualOffset);
 
         uint256 aaveCap = aaveBefore < aaveIdle ? aaveBefore : aaveIdle;
         uint256 morphoCap = liveMaxWithdraw > morphoAssets ? morphoAssets : liveMaxWithdraw;
@@ -211,7 +212,7 @@ contract ForkCapacityBoundaryTest is ForkBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
-        uint256 shares = router.deposit(amount, alice);
+        uint256 shares = router.deposit(amount, alice, 0);
         vm.stopPrank();
 
         assertGt(shares, 0, "deposit at min-capacity boundary succeeds");

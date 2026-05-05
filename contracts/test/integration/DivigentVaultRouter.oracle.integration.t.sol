@@ -35,7 +35,7 @@ contract DivigentVaultRouterOracleIntegrationTest is RouterIntegrationBase {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectRevert(IDivigentVaultRouter.StaleOracle.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
 
         uint256 aliceBefore = usdc.balanceOf(alice);

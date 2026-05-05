@@ -23,6 +23,7 @@ contract PropertyFuzzTest is Actions {
     uint256 internal constant MAX_DEPOSIT = 400_000e6;
     uint256 internal constant MIN_YIELD = 100e6; // below this, per-wei rounding dominates
     uint256 internal constant MAX_YIELD = 100_000e6;
+    uint256 internal constant ROUTER_VIRTUAL_OFFSET = 1e6;
     // Fresh actors get 2x MAX_DEPOSIT so they can cover any bounded amount
     // plus a second deposit if the test needs one.
     uint256 internal constant ACTOR_FUNDING = MAX_DEPOSIT * 2;
@@ -86,8 +87,7 @@ contract PropertyFuzzTest is Actions {
     // Fee properties
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Fee charged on withdraw equals exactly 10% of realised yield,
-    ///         within tight rounding tolerance.
+    /// @notice Fee charged on withdraw equals exactly 10% of realised yield.
     function test_fee_fuzz_exactlyTenPercentOfRealisedYield(uint128 deposit_, uint96 yield_) public {
         uint256 dep = bound(uint256(deposit_), 10_000e6, MAX_DEPOSIT);
         uint256 yld = bound(uint256(yield_), MIN_YIELD, MAX_YIELD);
@@ -100,12 +100,15 @@ contract PropertyFuzzTest is Actions {
         accrueAaveYield(yld);
 
         uint256 treasuryBefore = usdc.balanceOf(treasury);
-        userWithdraws(user, shares);
+        uint256 returned = userWithdraws(user, shares);
         uint256 feeCharged = usdc.balanceOf(treasury) - treasuryBefore;
+        uint256 grossReturned = returned + feeCharged;
+        uint256 realisedYield = grossReturned - dep;
 
-        // Withdraw path has one vault-redemption rounding step; fee is computed
-        // on the post-redemption gross. Tolerance of 2 wei covers that.
-        assertApproxEqAbs(feeCharged, yld / 10, 2, "fee == 10% of realised yield");
+        uint256 virtualResidualBound = (yld * ROUTER_VIRTUAL_OFFSET) / (dep + ROUTER_VIRTUAL_OFFSET) + 2;
+        assertLe(realisedYield, yld, "realised yield cannot exceed accrued yield");
+        assertGe(realisedYield + virtualResidualBound, yld, "residual must be bounded by virtual share ownership");
+        assertEq(feeCharged, expectedFee(realisedYield), "fee == 10% of realised yield");
     }
 
     /// @notice A same-block deposit + withdraw pays no fee, regardless of
@@ -228,10 +231,7 @@ contract PropertyFuzzTest is Actions {
     ///         preview is the protocol's public commitment for the caller,
     ///         so the withdraw has to deliver at least that. Fuzzed across
     ///         yield-only Aave positions.
-    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithYield(
-        uint128 deposit_,
-        uint96 yield_
-    ) public {
+    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithYield(uint128 deposit_, uint96 yield_) public {
         uint256 dep = bound(uint256(deposit_), 10_000e6, MAX_DEPOSIT);
         uint256 yld = bound(uint256(yield_), 0, MAX_YIELD);
         address user = makeActor("slip_yield_user", ACTOR_FUNDING);
@@ -254,10 +254,7 @@ contract PropertyFuzzTest is Actions {
     /// @notice Same property under realised loss — preview accounts for the
     ///         loss-branch math (no fee on underwater slice), so
     ///         `minOut = preview` still succeeds.
-    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithLoss(
-        uint128 deposit_,
-        uint128 loss_
-    ) public {
+    function test_withdraw_fuzz_minOutEqualsPreview_succeeds_aaveWithLoss(uint128 deposit_, uint128 loss_) public {
         uint256 dep = bound(uint256(deposit_), 50_000e6, MAX_DEPOSIT);
         uint256 lossAmt = bound(uint256(loss_), 1_000e6, dep / 2);
         address user = makeActor("slip_loss_user", ACTOR_FUNDING);
@@ -312,10 +309,7 @@ contract PropertyFuzzTest is Actions {
     ///         matches actual within 4 wei in the tightest case, per
     ///         PreviewExecutionParity). Asserts the slippage guard is NOT
     ///         being bypassed on the fail side.
-    function test_withdraw_fuzz_minOutAbovePreview_reverts(
-        uint128 deposit_,
-        uint96 yield_
-    ) public {
+    function test_withdraw_fuzz_minOutAbovePreview_reverts(uint128 deposit_, uint96 yield_) public {
         uint256 dep = bound(uint256(deposit_), 10_000e6, MAX_DEPOSIT);
         uint256 yld = bound(uint256(yield_), 0, MAX_YIELD);
         address user = makeActor("slip_toohigh_user", ACTOR_FUNDING);

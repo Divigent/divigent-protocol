@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {Actions} from "../helpers/Actions.sol";
 
 /// @title  Inflation Protection: End-to-End Flow
-/// @notice Verifies the virtual-offset protection (`+1` in numerator and denominator
+/// @notice Verifies the virtual-offset protection in numerator and denominator
 ///         of `_assetsToShares`) actually defends against the classic ERC-4626
 ///         first-depositor inflation attack.
 ///
@@ -58,8 +58,8 @@ contract InflationProtectionTest is Actions {
         uint256 victimShares = userDeposits(victim, victimDeposit);
 
         // Virtual-offset protection: victim must mint >0 shares despite the inflated
-        // PPS. Without the +1 offset, the share calculation would round to zero and
-        // the deposit would revert with ZeroAmount, locking out new depositors entirely.
+        // PPS. The virtual offset keeps ordinary deposits from rounding to zero under
+        // donation-inflated early supply states.
         assertGt(victimShares, 0, "Phase3: virtual offset protects against zero-share mint");
 
         // ─── Phase 4: Victim withdraws ────────────────────────────────────

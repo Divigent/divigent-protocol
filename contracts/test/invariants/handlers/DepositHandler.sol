@@ -36,7 +36,7 @@ contract DepositHandler is CommonBase, StdUtils {
 
         vm.startPrank(actor);
         usdc.approve(address(router), amount);
-        try router.deposit(amount, actor) {
+        try router.deposit(amount, actor, 0) {
             totalDeposited += amount;
             depositCount++;
         } catch {

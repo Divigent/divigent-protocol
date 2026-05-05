@@ -59,7 +59,7 @@ contract ForkStressedCapacityTest is ForkBase {
         deal(BASE_USDC, alice, depositAmount);
         vm.startPrank(alice);
         usdc.approve(address(router), depositAmount);
-        router.deposit(depositAmount, alice);
+        router.deposit(depositAmount, alice, 0);
         vm.stopPrank();
 
         uint256 morphoAfter = morphoVault.balanceOf(address(router));
@@ -95,7 +95,7 @@ contract ForkStressedCapacityTest is ForkBase {
         vm.startPrank(alice);
         usdc.approve(address(router), amount);
         vm.expectPartialRevert(IDivigentVaultRouter.NoSafeRoute.selector);
-        router.deposit(amount, alice);
+        router.deposit(amount, alice, 0);
         vm.stopPrank();
     }
 
@@ -178,7 +178,8 @@ contract ForkStressedCapacityTest is ForkBase {
         uint256 supply = dvUsdc.totalSupply();
         uint256 aaveBal = aToken.balanceOf(address(router));
         uint256 totalHeld = aaveBal + morphoAssets;
-        uint256 grossEstimate = (shares * (totalHeld + 1)) / (supply + 1);
+        uint256 virtualOffset = 1e6;
+        uint256 grossEstimate = (shares * (totalHeld + virtualOffset)) / (supply + virtualOffset);
 
         uint256 aaveCap = 0; // idle drained
         uint256 morphoCap = morphoMaxW > morphoAssets ? morphoAssets : morphoMaxW;

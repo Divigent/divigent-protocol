@@ -93,7 +93,7 @@ contract RouterIntegrationBase is Test {
         usdc.approve(address(router), amount);
 
         vm.prank(caller);
-        return router.deposit(amount, wallet);
+        return router.deposit(amount, wallet, 0);
     }
 
     function _setAaveAvailableLiquidity(uint256 availableUsdc) internal {

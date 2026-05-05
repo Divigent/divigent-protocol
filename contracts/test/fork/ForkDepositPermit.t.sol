@@ -57,7 +57,7 @@ contract ForkDepositPermitTest is ForkBase {
         uint256 sharesBefore = dvUsdc.balanceOf(carol);
 
         vm.prank(carol);
-        uint256 minted = router.depositWithPermit(amount, carol, deadline, v, r, s);
+        uint256 minted = router.depositWithPermit(amount, carol, deadline, v, r, s, 0);
 
         assertGt(minted, 0, "shares minted");
         assertEq(dvUsdc.balanceOf(carol), sharesBefore + minted, "carol receives dvUSDC");
@@ -76,7 +76,7 @@ contract ForkDepositPermitTest is ForkBase {
 
         vm.prank(carol);
         vm.expectRevert(IDivigentVaultRouter.PermitExpired.selector);
-        router.depositWithPermit(amount, carol, deadline, v, r, s);
+        router.depositWithPermit(amount, carol, deadline, v, r, s, 0);
     }
 
     /// @dev Replay: the same signature must only work once. Second use
@@ -88,13 +88,13 @@ contract ForkDepositPermitTest is ForkBase {
 
         // First use succeeds
         vm.prank(carol);
-        router.depositWithPermit(amount, carol, deadline, v, r, s);
+        router.depositWithPermit(amount, carol, deadline, v, r, s, 0);
 
         // Second use must revert — USDC's permit enforces nonce monotonicity.
         // Circle's USDC reverts with a require-string; match any revert from USDC's call.
         vm.prank(carol);
         vm.expectRevert(); // intentionally broad — USDC's error is string-based
-        router.depositWithPermit(amount, carol, deadline, v, r, s);
+        router.depositWithPermit(amount, carol, deadline, v, r, s, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

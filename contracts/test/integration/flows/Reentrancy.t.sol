@@ -84,7 +84,7 @@ contract ReentrancyTest is Test {
         vm.prank(alice);
         usdc.approve(address(router), 50_000e6);
         vm.prank(alice);
-        router.deposit(50_000e6, alice);
+        router.deposit(50_000e6, alice, 0);
 
         assertEq(hostile.balanceOf(address(router)), 50_000e6, "router holds hostile-vault shares");
 
@@ -110,7 +110,7 @@ contract ReentrancyTest is Test {
         usdc.approve(address(router), 50_000e6);
         vm.prank(alice);
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-        router.deposit(50_000e6, alice);
+        router.deposit(50_000e6, alice, 0);
 
         assertEq(dvUsdc.balanceOf(alice), 0, "no shares minted on blocked deposit");
     }
@@ -120,7 +120,7 @@ contract ReentrancyTest is Test {
         vm.prank(alice);
         usdc.approve(address(router), 50_000e6);
         vm.prank(alice);
-        router.deposit(50_000e6, alice);
+        router.deposit(50_000e6, alice, 0);
 
         // Arm cross-function: withdraw callback tries to call deposit
         hostile.armCrossFunctionReentrance();
@@ -138,7 +138,7 @@ contract ReentrancyTest is Test {
         vm.prank(alice);
         usdc.approve(address(router), 50_000e6);
         vm.prank(alice);
-        router.deposit(50_000e6, alice);
+        router.deposit(50_000e6, alice, 0);
 
         // Arm Aave for reentrance on withdraw
         aavePool.setReentranceTarget(address(router), alice);
@@ -163,7 +163,7 @@ contract ReentrancyTest is Test {
         vm.prank(alice);
         usdc.approve(address(router), 50_000e6);
         vm.prank(alice);
-        router.deposit(50_000e6, alice);
+        router.deposit(50_000e6, alice, 0);
 
         // Snapshot pre-withdraw PPS (used as boundary for the mid-flight envelope check)
         uint256 ppsBefore = router.pricePerShare();
@@ -286,7 +286,7 @@ contract HostileMorpho {
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
         if (depositReentranceArmed) {
             depositReentranceArmed = false;
-            DivigentVaultRouter(router).deposit(1000e6, receiver);
+            DivigentVaultRouter(router).deposit(1000e6, receiver, 0);
             revert("HostileMorpho: deposit reentrance was NOT blocked");
         }
         usdc.burn(msg.sender, assets);
@@ -304,7 +304,7 @@ contract HostileMorpho {
         }
         if (crossFunctionArmed) {
             crossFunctionArmed = false;
-            DivigentVaultRouter(router).deposit(1000e6, owner_);
+            DivigentVaultRouter(router).deposit(1000e6, owner_, 0);
             revert("HostileMorpho: cross-function reentrance was NOT blocked");
         }
         if (readOnlyReentranceArmed) {

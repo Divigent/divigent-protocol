@@ -124,7 +124,7 @@ contract WithdrawCapacityTest is Actions {
         assertEq(cap.totalWithdrawCap, cap.aaveWithdrawCap, "total = Aave only");
     }
 
-    /// @notice Gas-bomb Morpho view: the try/catch ceiling (`MORPHO_VIEW_GAS`)
+    /// @notice Gas-bomb Morpho view: the try/catch ceiling (`morphoViewGas`)
     ///         absorbs the hit, capacity view still returns. Without the
     ///         gas limit, the caller would be out-of-gas'd by the malicious
     ///         vault view.
@@ -135,14 +135,49 @@ contract WithdrawCapacityTest is Actions {
 
         morphoVault.setGasBombConvertToAssets(true);
 
+        uint256 budget = router.morphoViewGas();
+
         uint256 gasBefore = gasleft();
         IDivigentVaultRouter.VaultCapacity memory cap = router.withdrawCapacity();
         uint256 gasUsed = gasBefore - gasleft();
 
         assertFalse(cap.morphoReachable, "gas-bomb flips reachable false");
-        // Total gas consumed by the view must be bounded — the 100k cap plus
-        // surrounding overhead, comfortably under 200k.
-        assertLt(gasUsed, 200_000, "gas-bomb absorbed by try/catch ceiling");
+        // Total gas consumed by the view is bounded by the forwarded
+        // stipend plus surrounding overhead. Allow ~150k of overhead on
+        // top of the configured budget.
+        assertLt(gasUsed, budget + 150_000, "gas-bomb absorbed by try/catch ceiling");
+    }
+
+    function test_setMorphoViewGas_wiredIntoPlanWithdrawCapacity() public {
+        address user = makeActor("morpho_wired", 500_000e6);
+        useMorphoRoute();
+        userDeposits(user, MORPHO_DEP);
+
+        // Burn target chosen with wide margin from both bounds:
+        //   - default 350_000 forwarded → ~344k reaches callee → < 500k → OOG
+        //   - raised  750_000 forwarded → ~738k reaches callee → > 500k → ok
+        morphoVault.setGasToBurnInConvertToAssets(500_000);
+
+        IDivigentVaultRouter.VaultCapacity memory atFloor = router.withdrawCapacity();
+        assertFalse(
+            atFloor.morphoReachable,
+            "default 350k floor must be insufficient for the 500k burn"
+        );
+
+        vm.prank(emergencyMultisig);
+        router.setMorphoViewGas(750_000);
+
+        IDivigentVaultRouter.VaultCapacity memory raised = router.withdrawCapacity();
+        assertTrue(
+            raised.morphoReachable,
+            "raised 750k must allow the 500k burn to complete; "
+            "if false, the call site is not reading the state variable"
+        );
+        assertGt(
+            raised.morphoAssetsHeld,
+            0,
+            "Morpho leg must value its shares after the raised budget clears"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -152,7 +187,7 @@ contract WithdrawCapacityTest is Actions {
     // which fails loud on any Morpho read failure. That made every external
     // integrator (dashboards, keepers, other contracts) brick whenever Morpho
     // misbehaved, while `withdrawCapacity()` degraded gracefully via the same
-    // 100k-gas try/catch. The fix routes `getCurrentAllocation` through
+    // bounded-gas try/catch. The fix routes `getCurrentAllocation` through
     // `_planWithdrawCapacity` so both views share one reachability path.
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -185,13 +220,15 @@ contract WithdrawCapacityTest is Actions {
 
         morphoVault.setGasBombConvertToAssets(true);
 
+        uint256 budget = router.morphoViewGas();
+
         uint256 gasBefore = gasleft();
         (uint256 aaveAssets, uint256 morphoAssets) = router.getCurrentAllocation();
         uint256 gasUsed = gasBefore - gasleft();
 
         assertEq(aaveAssets, aToken.balanceOf(address(router)), "Aave leg still reported");
         assertEq(morphoAssets, 0, "Morpho leg reports 0 under gas bomb");
-        assertLt(gasUsed, 200_000, "Gas bomb absorbed by 100k try/catch ceiling");
+        assertLt(gasUsed, budget + 150_000, "Gas bomb absorbed by morphoViewGas ceiling");
     }
 
     /// @notice Healthy-state parity with the old implementation. The pre-fix body

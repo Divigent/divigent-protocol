@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {TestBase} from "../TestBase.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {IDivigentVaultRouter} from "../../src/interfaces/IDivigentVaultRouter.sol";
 
 /// @title  FindingsValidation
 /// @notice Pins three auditor findings using the REAL failure modes they
@@ -40,7 +41,7 @@ contract FindingsValidation is TestBase {
         // Alice deposits and earns yield (realistic starting state)
         vm.startPrank(alice);
         usdc.approve(address(router), DEPOSIT);
-        router.deposit(DEPOSIT, alice);
+        router.deposit(DEPOSIT, alice, 0);
         vm.stopPrank();
 
         // Simulate Aave rebasing yield
@@ -214,9 +215,8 @@ contract FindingsValidation is TestBase {
     // ========================================================================
 
     /// @notice R5 regression: previewWithdrawNet must NOT revert for
-    ///         legitimate large positions. The fix wraps the 4-way numerator
-    ///         in OZ `Math.mulDiv` (512-bit intermediate) so the product can
-    ///         exceed 2^256 safely.
+    ///         legitimate large positions. Impossible requests now fail with
+    ///         a typed max-deliverable error instead of a silent clamp.
     function test_R5_largePosition_previewDoesNotOverflow() public {
         vm.warp(block.timestamp + 92 days); // Day 91+ removes TVL cap
 
@@ -226,18 +226,25 @@ contract FindingsValidation is TestBase {
 
         vm.startPrank(alice);
         usdc.approve(address(router), whale);
-        router.deposit(whale, alice);
+        router.deposit(whale, alice, 0);
         vm.stopPrank();
 
         uint256 walletShares = dvUsdc.balanceOf(alice);
         uint256 totalPosition = whale + DEPOSIT;
 
         uint256 sharesAtPosition = router.previewWithdrawNet(totalPosition, alice);
-        assertGt(sharesAtPosition, 0, "preview returns non-zero for servable position");
-        assertLe(sharesAtPosition, walletShares, "preview caps at walletShares");
+        assertGt(sharesAtPosition, 0, "preview returns non-zero for serviceable position");
+        assertLe(sharesAtPosition, walletShares, "preview stays within walletShares");
 
-        uint256 sharesAtMax = router.previewWithdrawNet(type(uint128).max, alice);
-        assertEq(sharesAtMax, walletShares, "uint128-max desiredNet caps at walletShares");
+        uint256 maxDeliverable = router.previewRedeem(walletShares, alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IDivigentVaultRouter.UnserviceableNet.selector,
+                type(uint128).max,
+                maxDeliverable
+            )
+        );
+        router.previewWithdrawNet(type(uint128).max, alice);
     }
 
     // ========================================================================

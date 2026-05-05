@@ -20,7 +20,7 @@ import {MockERC20} from "../../mocks/MockERC20.sol";
 ///              remain valid across the run).
 ///           2. Builds a fresh EIP-712 permit digest, signs with the actor's
 ///              key, produces (v, r, s).
-///           3. Calls `router.depositWithPermit(amount, actor, deadline, v, r, s)`
+///           3. Calls `router.depositWithPermit(amount, actor, deadline, v, r, s, 0)`
 ///              from a permissionless relayer address — confirming the relay
 ///              path is safe AND the permit fuels a legitimate deposit.
 ///
@@ -71,7 +71,7 @@ contract PermitHandler is CommonBase, StdUtils {
         (uint8 v, bytes32 r, bytes32 s) = _signPermit(key, actor, address(router), amount, deadline);
 
         vm.prank(relay);
-        try router.depositWithPermit(amount, actor, deadline, v, r, s) {
+        try router.depositWithPermit(amount, actor, deadline, v, r, s, 0) {
             totalPermitDeposited += amount;
             permitDepositCount++;
         } catch {

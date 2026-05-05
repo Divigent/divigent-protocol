@@ -92,11 +92,12 @@ contract RoutingTransitionTest is Actions {
         // She owns aliceShares / (aliceShares + bobShares) of the pool.
         uint256 expectedAliceYield = (totalYield * aliceShares) / (aliceShares + bobShares);
 
-        assertApproxEqAbs(
-            aliceYield,
+        uint256 residualBound = (totalYield * 1e6) / (aliceShares + bobShares + 1e6) + 4;
+        assertLe(aliceYield, expectedAliceYield, "Phase5: Alice yield cannot exceed ideal share-weighted yield");
+        assertGe(
+            aliceYield + residualBound,
             expectedAliceYield,
-            4,
-            "Phase5: Alice's yield matches her share-weighted slice of COMBINED pool yield"
+            "Phase5: Alice yield residual is bounded by virtual share ownership"
         );
         assertEq(aliceFee, expectedFee(aliceYield), "Phase5: Alice's fee == 10% of her realised yield");
 
@@ -114,8 +115,11 @@ contract RoutingTransitionTest is Actions {
 
         uint256 expectedBobYield = (totalYield * bobShares) / (aliceShares + bobShares);
 
-        assertApproxEqAbs(
-            bobYield, expectedBobYield, 4, "Phase6: Bob's yield matches his share-weighted slice of COMBINED pool yield"
+        assertLe(bobYield, expectedBobYield, "Phase6: Bob yield cannot exceed ideal share-weighted yield");
+        assertGe(
+            bobYield + residualBound,
+            expectedBobYield,
+            "Phase6: Bob yield residual is bounded by virtual share ownership"
         );
         assertEq(bobFee, expectedFee(bobYield), "Phase6: Bob's fee == 10% of his realised yield");
 
@@ -123,12 +127,14 @@ contract RoutingTransitionTest is Actions {
 
         uint256 totalToUsers = aliceReturn + bobReturn;
         uint256 totalToTreasury = aliceFee + bobFee;
+        uint256 residualAssets = router.totalVaultAssets();
         assertApproxEqAbs(
-            totalToUsers + totalToTreasury,
+            totalToUsers + totalToTreasury + residualAssets,
             (aliceDeposit + bobDeposit) + totalYield,
             8,
-            "Conservation: users + treasury == deposits + yield (rounding tolerance)"
+            "Conservation: users + treasury + residual == deposits + yield"
         );
+        assertLe(residualAssets, residualBound, "Conservation: residual bounded by virtual share ownership");
 
         assertEq(dvUsdc.totalSupply(), 0, "All shares burned");
         assertEq(usdc.balanceOf(address(router)), 0, "Router holds no USDC (INV-4)");

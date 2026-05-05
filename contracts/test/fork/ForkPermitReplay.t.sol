@@ -55,7 +55,7 @@ contract ForkPermitReplayTest is ForkBase {
         uint256 relayUsdcBefore = usdc.balanceOf(relay);
 
         vm.prank(relay);
-        uint256 shares = router.depositWithPermit(amount, keyedSigner, deadline, v, r, s);
+        uint256 shares = router.depositWithPermit(amount, keyedSigner, deadline, v, r, s, 0);
 
         assertGt(shares, 0, "dvUSDC minted");
         assertEq(dvUsdc.balanceOf(keyedSigner), shares, "shares to signer, not relay");
@@ -81,16 +81,16 @@ contract ForkPermitReplayTest is ForkBase {
 
         // 1st submission — succeeds
         vm.prank(relay);
-        router.depositWithPermit(amount, keyedSigner, deadline, v, r, s);
+        router.depositWithPermit(amount, keyedSigner, deadline, v, r, s, 0);
 
         // 2nd submission — replay. The nonce advanced on the first call,
-        // so this signature no longer recovers to `keyedSigner`. Live USDC
-        // reverts on the bad recovery. The router propagates the revert.
+        // so this signature no longer recovers to `keyedSigner`. The router
+        // swallows the permit failure, then fails its allowance check.
         // We don't pin the specific selector (Circle's implementation can
         // evolve), just that the call fails.
         vm.prank(relay);
         vm.expectRevert();
-        router.depositWithPermit(amount, keyedSigner, deadline, v, r, s);
+        router.depositWithPermit(amount, keyedSigner, deadline, v, r, s, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
