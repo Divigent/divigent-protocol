@@ -111,6 +111,20 @@ loses value (bad debt, impairment), the user absorbs the loss but pays zero
 fee. Fee is deducted at withdrawal time from the actual USDC received, not
 from an estimate.
 
+**Yield scope: base APY only.** Divigent captures base supply yield from
+Aave V3 and the configured MetaMorpho USDC vault as reflected in aToken
+balances and vault share value. It does not claim or distribute third-party
+incentive rewards, such as AAVE, MORPHO, or other tokens that Aave's
+RewardsController, Morpho's Universal Reward Distributor, or external
+campaign infrastructure may credit to the router's positions.
+
+Because the router supplies and deposits with itself as the aToken / vault
+share holder, any such incentives would accrue to the router address. v1 has
+no claim, skim, sweep, or distribution path for those reward tokens, so
+depositors should not assume any third-party reward stream beyond base
+Aave/Morpho supply APY. A future version would need explicit claim and
+distribution logic if those rewards become economically material.
+
 **Delta-based USDC measurement.** The router snapshots
 `USDC.balanceOf(this)` before vault redemptions and measures the delta
 after. Any stray USDC accidentally sent to the router is excluded from

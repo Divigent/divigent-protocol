@@ -77,6 +77,21 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///         - Actual-gross fee: fee is computed from USDC.balanceOf(this) after all vault
 ///           redemptions, not a pre-estimated gross, so rounding never charges fee on principal.
 ///
+///         ── Third-party rewards and incentives ─────────────
+///         Aave V3 RewardsController programs and Morpho Universal Reward
+///         Distributor (URD) programs may attribute incentive rewards to the
+///         address holding the underlying aTokens or vault shares. This router
+///         supplies and deposits with address(this) as the recipient, so any
+///         such rewards would accrue to the router itself.
+///
+///         The router intentionally has no claim, skim, sweep, rewards-controller,
+///         or URD integration. Divigent v1 only accounts for base Aave/Morpho
+///         supply yield reflected in aToken balances and MetaMorpho share value.
+///         Any third-party incentive tokens credited to the router are not
+///         distributed as depositor yield and may be unreachable in this immutable
+///         deployment. If rewards become economically material, a future version
+///         would need explicit claim and distribution logic.
+///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
@@ -1017,7 +1032,9 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
         // Select a route that passes both oracle safety and amount capacity.
         vaultType = _selectDepositRoute(vaultType, amount);
 
-        // Route USDC to the selected vault
+        // Route USDC to the selected vault. The router becomes the holder of the
+        // resulting aTokens / vault shares; any third-party reward attribution
+        // accrues here and is not claimed by v1.
         // [INV-4]: After supply call, USDC.balanceOf(this) == 0
         if (vaultType == IDivigentYieldOracle.VaultType.AAVE) {
             // USDC is already approved to Aave in constructor
