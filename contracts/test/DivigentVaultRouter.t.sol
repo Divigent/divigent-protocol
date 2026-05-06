@@ -690,20 +690,18 @@ contract DivigentVaultRouterTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev dvUSDC.transferFrom() (even with allowance) must revert.
-    function test_dvUSDC_nonTransferable_transferFrom() public {
+    /// @dev dvUSDC should not record usable allowances because transferFrom can never move it.
+    function test_dvUSDC_nonTransferable_nonZeroApprovalReverts() public {
         uint256 depositAmount = 10_000e6;
         _deposit(alice, alice, depositAmount);
 
         uint256 shares = dvUsdc.balanceOf(alice);
 
         vm.prank(alice);
+        vm.expectRevert(DvUSDC.NonTransferable.selector);
         dvUsdc.approve(bob, shares);
 
-        vm.startPrank(bob);
-        vm.expectRevert(DvUSDC.NonTransferable.selector);
-        dvUsdc.transferFrom(alice, bob, shares);
-        vm.stopPrank();
+        assertEq(dvUsdc.allowance(alice, bob), 0, "approval must not leave stale allowance");
     }
 
     /// @dev Mint (from == address(0)) must still work — invoked via deposit.

@@ -115,16 +115,15 @@ contract DvUSDCTest is Test {
         token.transfer(alice, 10e6);
     }
 
-    function test_transferFrom_revertsBetweenTwoNonZeroAddressesEvenWithAllowance() public {
+    function test_approve_revertsForNonZeroAllowance() public {
         vm.prank(vaultRouter);
         token.mint(alice, 100e6);
 
+        vm.expectRevert(DvUSDC.NonTransferable.selector);
         vm.prank(alice);
         token.approve(bob, type(uint256).max);
 
-        vm.expectRevert(DvUSDC.NonTransferable.selector);
-        vm.prank(bob);
-        token.transferFrom(alice, carol, 50e6);
+        assertEq(token.allowance(alice, bob), 0, "Non-zero approval must not mutate allowance");
     }
 
     function test_transfer_revertsWhenRecipientIsRouterButSenderIsNotMinting() public {
@@ -168,19 +167,15 @@ contract DvUSDCTest is Test {
         token.burn(bob, 1);
     }
 
-    function test_approve_worksEvenThoughTransfersRevert() public {
+    function test_approve_zeroAllowanceAllowed() public {
         vm.prank(vaultRouter);
         token.mint(alice, 100e6);
 
         vm.prank(alice);
-        token.approve(bob, 50e6);
+        bool ok = token.approve(bob, 0);
 
-        assertEq(token.allowance(alice, bob), 50e6, "Allowance should be set");
-
-        // But using the allowance still reverts
-        vm.expectRevert(DvUSDC.NonTransferable.selector);
-        vm.prank(bob);
-        token.transferFrom(alice, bob, 50e6);
+        assertTrue(ok, "Zero approval should be accepted");
+        assertEq(token.allowance(alice, bob), 0, "Zero approval keeps allowance clear");
     }
 
     function test_mint_nonRouterWithZeroAmount_stillReverts() public {

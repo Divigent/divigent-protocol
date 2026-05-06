@@ -22,6 +22,8 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///           calculation incorrect and opening a principal-theft vector. Transfers are
 ///           only allowed from/to address(0) (mint and burn respectively).
 ///         - 6 decimals to match USDC, simplifying exchange-rate arithmetic in VaultRouter.
+///         - Non-zero approvals are blocked because delegated transfers can never
+///           succeed and visible allowances would mislead wallets and scanners.
 ///         - ERC20Permit is intentionally omitted: permit + delegated-transfer could
 ///           circumvent the non-transferability constraint via a signed approval flow.
 ///
@@ -40,7 +42,7 @@ contract DvUSDC is ERC20 {
     ///      can query it directly, so the error only reports the offending caller.
     error OnlyVaultRouter(address caller);
 
-    /// @dev Reverts on any transfer between two non-zero addresses.
+    /// @dev Reverts on any transfer between two non-zero addresses or non-zero approval.
     ///      dvUSDC is a position receipt bound to the depositing wallet; it cannot
     ///      be sold, transferred, or gifted. Only minting (from == 0) and burning
     ///      (to == 0) are permitted.
@@ -84,6 +86,19 @@ contract DvUSDC is ERC20 {
             revert NonTransferable();
         }
         super._update(from, to, value);
+    }
+
+    /// @dev Blocks non-zero allowance entries. Since dvUSDC cannot be transferred
+    ///      between wallets, any usable allowance would be misleading. Zero approvals
+    ///      remain allowed so reset/revoke flows keep working as expected.
+    function _approve(
+        address owner,
+        address spender,
+        uint256 value,
+        bool emitEvent
+    ) internal override {
+        if (value != 0) revert NonTransferable();
+        super._approve(owner, spender, value, emitEvent);
     }
 
     // ── Token Operations ──────────────────────────────────────────────────────
