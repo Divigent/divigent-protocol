@@ -140,9 +140,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @inheritdoc IDivigentYieldOracle
     uint256 public lastObservationTime;
 
-    /// @notice The vault type that was optimal at the last observation.
-    VaultType public lastOptimalVaultType;
-
     /// @notice Morpho share-price baseline used for the next positive-rate interval.
     ///         Preserved across flat or downward observations.
     ///         Advances only on strict positive share-price movement.
@@ -191,7 +188,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         morphoSpotRate       = 0; // conservative: wait for first observation interval
 
         lastObservationTime  = block.timestamp;
-        lastOptimalVaultType = VaultType.AAVE; // conservative default
     }
 
     // ── External: IDivigentYieldOracle ────────────────────────────────────────

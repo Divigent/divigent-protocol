@@ -41,11 +41,6 @@ contract DivigentYieldOracleTest is TestBase {
         );
         assertEq(yieldOracle.morphoSpotRate(), 0, "Morpho spot rate should start at zero");
         assertEq(yieldOracle.lastObservationTime(), block.timestamp, "Last observation time seed mismatch");
-        assertEq(
-            uint256(yieldOracle.lastOptimalVaultType()),
-            uint256(IDivigentYieldOracle.VaultType.AAVE),
-            "Default vault type mismatch"
-        );
     }
 
     // ----- recordObservation tests -----------------
