@@ -516,7 +516,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
 
         // Recompute yield from actual gross; floor at 0 — principal is never negative yield
         uint256 actualYield  = actualGross > principalOut ? actualGross - principalOut : 0;
-        uint256 feeAmount    = FEE_COLLECTOR.calculateFee(actualYield);
+        uint256 feeAmount    = actualYield > 0 ? FEE_COLLECTOR.calculateFee(actualYield) : 0;
         usdcReturned         = actualGross - feeAmount;
 
         if (usdcReturned < minUsdcOut) {
@@ -615,7 +615,7 @@ contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
             : 0;
 
         uint256 yield    = gross > principalOut ? gross - principalOut : 0;
-        uint256 fee      = FEE_COLLECTOR.calculateFee(yield);
+        uint256 fee      = yield > 0 ? FEE_COLLECTOR.calculateFee(yield) : 0;
         usdcOut          = gross - fee;
     }
 
