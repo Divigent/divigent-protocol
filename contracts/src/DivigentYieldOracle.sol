@@ -299,10 +299,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
         if (morphoBaseline == 0) {
             morphoBaseline = currentSharePrice;
-        } else if (
-            currentSharePrice > morphoBaseline
-            && elapsed > 0
-        ) {
+        } else if (currentSharePrice > morphoBaseline) {
             // Annualised rate in ray:
             // rate = (priceDelta / baseline) * (SECONDS_PER_YEAR / elapsed) * RAY
             newMorphoRate = (currentSharePrice - morphoBaseline)
