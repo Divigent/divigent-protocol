@@ -75,9 +75,18 @@ observations and computes a 4-hour time-weighted average rate (TWAR) for each
 vault, following the Uniswap V2 accumulator pattern adapted for interest
 rates. Aave rates are read directly from `currentLiquidityRate`. Morpho
 rates are derived from consecutive share-price snapshots via
-`convertToAssets(1e18)`, annualised over the observation interval. The
+`convertToAssets(1e24)`, annualised over the observation interval. The
 oracle is permissionless: any address can call `recordObservation()` to
 prevent staleness.
+
+During oracle warm-up, the checkpoint buffer may not yet span the full
+4-hour TWAR window. In that state, the oracle returns current spot rates
+when no usable checkpoints exist, or averages over the shorter available
+checkpoint history. `isFresh()` only confirms that the last observation is
+within the 2-hour staleness bound; it does not certify that the averaging
+window is fully mature. Keepers should call `recordObservation()` at the
+5-minute cadence from deployment, and integrators that require full-window
+TWAR smoothing should wait until observations cover `TWAR_WINDOW`.
 
 **DivigentFeeCollector** calculates and routes the 10% yield fee. Fee is
 computed exclusively from realised yield at withdrawal time. If a vault
@@ -114,7 +123,7 @@ dust per operation, bounded at approximately 1 USDC unit ($0.000001).
 
 **MetaMorpho 18-decimal shares.** MetaMorpho vaults use
 `DECIMALS_OFFSET = 18 - assetDecimals`, producing 18-decimal shares for
-6-decimal USDC. The oracle uses `SHARE_UNIT = 1e18` for all Morpho
+6-decimal USDC. The oracle uses `SHARE_UNIT = 1e24` for all Morpho
 share-price queries. Using `1e6` would produce zero due to integer
 truncation.
 
@@ -151,7 +160,9 @@ USDC treasury blacklist events.
   defense-in-depth.
 - **Oracle freshness:** Deposits revert with `StaleOracle()` if no
   observation has been recorded within 2 hours. The deposit path
-  auto-refreshes the oracle via `try oracle.recordObservation()`.
+  auto-refreshes the oracle via `try oracle.recordObservation()`. Freshness
+  is a recency check, not a guarantee that the oracle has accumulated a full
+  4-hour TWAR window.
 - **TVL cap schedule:** Contract-enforced phased rollout: $500k (day 0) →
   $2M (day 31) → unlimited (day 91).
 

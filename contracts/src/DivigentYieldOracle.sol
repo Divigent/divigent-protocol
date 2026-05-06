@@ -47,6 +47,19 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///         - Permissionless observation means any keeper, the router itself, or the SDK
 ///           can call recordObservation() to prevent staleness.
 ///
+///         Warm-up and partial-window behavior:
+///         - TWAR_WINDOW is 4 hours and the buffer holds 48 checkpoints at the
+///           5-minute MIN_OBSERVATION_INTERVAL. Until recorded checkpoints span
+///           the full window, _computeTWAR() returns spot rates when there are no
+///           usable checkpoints, or averages over the shorter available interval.
+///         - isFresh() is only a recency check against MAX_STALENESS. It does not
+///           certify that the checkpoint buffer spans the full TWAR_WINDOW.
+///         - During warm-up, returned rates are real on-chain rates but are less
+///           smoothed, and therefore less resistant to short-term rate movement,
+///           than a mature 4-hour TWAR. Keepers should call recordObservation()
+///           at the 5-minute cadence from deployment; integrators that require a
+///           fully mature window should wait until observations cover TWAR_WINDOW.
+///
 ///         Minimum re-routing differential (50 bps = 0.50%):
 ///         - Prevents unnecessary vault switches due to rate noise.
 ///         - Routing only changes when the challenger's TWAR exceeds the current
@@ -260,6 +273,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     }
 
     /// @inheritdoc IDivigentYieldOracle
+    /// @dev Pure recency check on the last observation. Does not certify that the
+    ///      checkpoint buffer spans the full TWAR_WINDOW; see the contract-level
+    ///      warm-up notes for partial-window fallback behavior.
     function isFresh() external view override returns (bool) {
         return block.timestamp - lastObservationTime <= MAX_STALENESS;
     }
@@ -370,8 +386,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     ///      where cumulativeNow is derived by extending the last stored checkpoint
     ///      with the current spot rate × elapsed time since last observation.
     ///
-    ///      If insufficient history exists (< 1 checkpoint older than windowStart),
-    ///      returns current spot rates as a conservative fallback.
+    ///      If recorded history does not span TWAR_WINDOW yet, this uses the
+    ///      oldest available checkpoint as the lower bound. With no usable
+    ///      checkpoint, or when the elapsed interval is zero, it falls back to
+    ///      current spot rates.
     function _computeTWAR()
         internal
         view

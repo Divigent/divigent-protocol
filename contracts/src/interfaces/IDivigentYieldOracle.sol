@@ -13,7 +13,7 @@ interface IDivigentYieldOracle {
         address vault;
         VaultType vaultType;
         uint256 spotRate;   // Current rate in ray (1e27), annualised
-        uint256 twarRate;   // 4-hour TWAR in ray (1e27), annualised
+        uint256 twarRate;   // TWAR/partial-window rate in ray (1e27), annualised
         bool    isSafe;     // Utilisation < UTILISATION_THRESHOLD
     }
 
@@ -29,6 +29,8 @@ interface IDivigentYieldOracle {
     // ── View ──────────────────────────────────────────────────────────────────
 
     /// @notice Returns the optimal vault for new deposits, using TWAR rates.
+    /// @dev During oracle warm-up, the returned rate may be spot-rate based or
+    ///      averaged over less than TWAR_WINDOW until checkpoints span the full window.
     ///         Falls back to Aave V3 only when Aave also passes its safety check.
     ///         Reverts if neither supported vault is currently safe.
     /// @return vault     Address of the recommended vault (Aave Pool or Morpho vault).
@@ -40,6 +42,8 @@ interface IDivigentYieldOracle {
         returns (address vault, VaultType vaultType, uint256 twarRate);
 
     /// @notice Returns rate data for all supported vaults.
+    /// @dev During oracle warm-up, twarRate may be spot-rate based or averaged
+    ///      over the shorter available checkpoint history.
     function getAllRates() external view returns (VaultRate[] memory rates);
 
     /// @notice Returns true if `vaultType` passes its safety heuristic.
@@ -54,6 +58,8 @@ interface IDivigentYieldOracle {
 
     /// @notice Returns true if the last observation is within MAX_STALENESS (2 hours).
     ///         VaultRouter reverts with StaleOracle() if this returns false on deposit.
+    /// @dev Recency check only. Does not guarantee that the internal averaging
+    ///      buffer spans the full TWAR_WINDOW.
     function isFresh() external view returns (bool);
 
     /// @notice Returns the number of seconds since the last recorded observation.
