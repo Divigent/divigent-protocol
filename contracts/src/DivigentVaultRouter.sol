@@ -92,6 +92,9 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///         deployment. If rewards become economically material, a future version
 ///         would need explicit claim and distribution logic.
 ///
+///         If Morpho valuation reverts, valuation-dependent views and flows halt
+///         rather than pricing Morpho at zero; v1 has no Aave-only haircut exit.
+///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentVaultRouter is IDivigentVaultRouter, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;

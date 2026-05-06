@@ -504,6 +504,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         } else {
             // Morpho MetaMorpho vault (18-decimal shares, 6-decimal USDC).
             // The peg threshold is scaled to the oracle's probe size.
+            // A revert propagates through getOptimalVault() and
+            // halts deposit routing rather than treating Morpho as safely valued
+            // at zero.
             uint256 sharePrice = MORPHO_VAULT.convertToAssets(SHARE_UNIT);
             return sharePrice >= MORPHO_PEG_ASSETS;
         }

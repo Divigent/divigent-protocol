@@ -149,11 +149,21 @@ math is factored into `_planWithdrawCapacity()` so `withdraw()` and the
 public `withdrawCapacity()` pre-flight view cannot disagree.
 
 **Morpho view-failure resilience.** `withdrawCapacity()` wraps Morpho's
-`convertToAssets` in try/catch with a 100k gas limit, returning a
+`convertToAssets` in try/catch with a bounded gas stipend, returning a
 `morphoReachable` flag so SDKs can distinguish "temporarily zero capacity"
 from "view path broken." `withdraw()` reverts with a clean
 `MorphoUnreachable` error when the view fails and the router has Morpho
 exposure.
+
+Core valuation remains fail-loud by design. `totalVaultAssets()`,
+`pricePerShare()`, previews, `getPosition()`, deposit TVL-cap checks, and
+share mint/redeem math require Morpho's share value to be readable whenever
+the router has Morpho exposure. If Morpho's `convertToAssets` reverts, v1
+does not value that leg at zero or offer an Aave-only emergency haircut exit;
+normal withdrawals resume automatically when Morpho's valuation path
+recovers. The emergency multisig can pause new deposits during a known
+Morpho disruption, but it cannot redirect funds or unblock existing
+positions.
 
 **Emergency treasury rotation.** `EMERGENCY_MULTISIG` can propose a new
 treasury address via a two-step timelock (7-day delay, 14-day grace). Stale
