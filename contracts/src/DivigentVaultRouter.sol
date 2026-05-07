@@ -66,6 +66,7 @@ import {DvUSDC}               from "./dvUSDC.sol";
 ///           gasless onboarding with a signed authorisation from the wallet owner.
 ///         - Operator model: wallets can grant operators deposit/withdraw rights without
 ///           transferring custody — the wallet remains the sole dvUSDC holder.
+///           v1 operator approvals are on-chain only; no setOperatorWithPermit path exists.
 ///         - Oracle freshness: _deposit() reverts with StaleOracle() if the oracle has
 ///           not been updated within MAX_STALENESS (2 hours), preventing routing decisions
 ///           based on stale rates.

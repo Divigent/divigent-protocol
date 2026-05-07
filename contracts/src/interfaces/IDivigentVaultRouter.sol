@@ -170,6 +170,7 @@ interface IDivigentVaultRouter {
     /// @notice Grants or revokes operator status for msg.sender's wallet.
     ///         An operator can call deposit() and withdraw() on behalf of the wallet.
     ///         The wallet retains full control and may revoke at any time.
+    /// @dev    v1 operator approvals are on-chain only; no permit-based approval path.
     /// @param operator Address to approve or revoke.
     /// @param approved True to grant operator status; false to revoke.
     function setOperator(address operator, bool approved) external;
