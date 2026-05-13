@@ -33,7 +33,6 @@ import {IDivigentYieldOracle} from "../../src/interfaces/IDivigentYieldOracle.so
 contract ForkStressedCapacityTest is ForkBase {
     function setUp() public override {
         super.setUp();
-        _seedOracle();
     }
 
     // ─────────────────────────────────────────────────────────────────────────

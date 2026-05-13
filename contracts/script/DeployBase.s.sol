@@ -111,7 +111,7 @@ contract DeployBase is Script {
 
         // Step 1: Oracle (no Divigent dependencies)
         DivigentYieldOracle oracle = new DivigentYieldOracle(
-            AAVE_POOL, AAVE_ATOKEN, USDC, MORPHO_VAULT
+            AAVE_POOL, AAVE_ATOKEN, USDC, MORPHO_VAULT, emergencyMultisig
         );
 
         // Step 2: Predict router address
@@ -207,6 +207,8 @@ contract DeployBase is Script {
 
         // Oracle reads real rates
         require(oracle.lastObservationTime() > 0, "Oracle not seeded");
+        require(oracle.ORACLE_ADMIN() == emergencyMultisig, "Oracle admin mismatch");
+        require(oracle.minDifferentialRay() == oracle.DEFAULT_MIN_DIFFERENTIAL_RAY(), "Oracle differential mismatch");
 
         // USDC approvals
         require(

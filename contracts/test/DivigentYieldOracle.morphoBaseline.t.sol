@@ -80,7 +80,13 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
     function test_morphoBaseline_zeroBaselineInitializesWithoutRate() public {
         morphoVault.setSharePrice(0);
         DivigentYieldOracle freshOracle =
-            new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
+            new DivigentYieldOracle(
+                address(aavePool),
+                address(aToken),
+                address(usdc),
+                address(morphoVault),
+                emergencyMultisig
+            );
         assertEq(freshOracle.lastMorphoSharePrice(), 0, "test precondition: fresh baseline is zero");
 
         morphoVault.setSharePrice(1_000_000);

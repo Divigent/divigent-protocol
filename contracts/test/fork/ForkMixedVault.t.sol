@@ -18,17 +18,17 @@ import {IDivigentYieldOracle} from "../../src/interfaces/IDivigentYieldOracle.so
 contract ForkMixedVaultTest is ForkBase {
     function setUp() public override {
         super.setUp();
-        _seedOracle();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helper: force a mixed position by draining Aave idle between deposits
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev Deposit first with whatever the oracle recommends (usually Aave),
-    ///      then zero out Aave's live idle USDC balance so the second deposit
-    ///      must fall through to Morpho via `_canAllocate`. Returns the Aave
-    ///      and Morpho asset balances held by the router after both deposits.
+    /// @dev Deposit first with the oracle's natural recommendation (Aave, due
+    ///      to the unseeded morphoSpotRate=0 in setUp), then zero out Aave's
+    ///      live idle USDC balance so the second deposit must fall through to
+    ///      Morpho via `_canAllocate`. Returns the router's Aave/Morpho
+    ///      balances after both deposits.
     function _forceMixedPosition(address user, uint256 perLeg)
         internal
         returns (uint256 aaveBal, uint256 morphoBal)

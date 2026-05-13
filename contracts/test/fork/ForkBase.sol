@@ -76,7 +76,8 @@ abstract contract ForkBase is Test, BaseAddresses {
             BASE_AAVE_POOL,
             BASE_AAVE_ATOKEN_USDC,
             BASE_USDC,
-            BASE_MORPHO_STEAKHOUSE
+            BASE_MORPHO_STEAKHOUSE,
+            multisig
         );
 
         // Predict router address for circular references
