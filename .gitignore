@@ -33,6 +33,7 @@ contracts/echidna-corpus/
 contracts/echidna.yaml
 contracts/medusa-corpus/
 contracts/medusa.json
+contracts/analytics
 
 lcov.info
 # Vendored deps inside contracts/

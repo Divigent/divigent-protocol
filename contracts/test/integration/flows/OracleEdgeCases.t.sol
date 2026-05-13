@@ -27,7 +27,13 @@ contract OracleEdgeCasesTest is Actions {
         super.setUp();
 
         // Deploy a real oracle pointing at the same mocks the base uses.
-        realOracle = new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
+        realOracle = new DivigentYieldOracle(
+            address(aavePool),
+            address(aToken),
+            address(usdc),
+            address(morphoVault),
+            emergencyMultisig
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

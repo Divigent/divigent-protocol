@@ -26,6 +26,15 @@ interface IDivigentYieldOracle {
         uint256 morphoRate
     );
 
+    /// @notice Emitted when ORACLE_ADMIN updates the routing differential threshold.
+    event MinDifferentialRayUpdated(uint256 oldValue, uint256 newValue);
+
+    /// @notice Emitted when ORACLE_ADMIN schedules a routing differential threshold.
+    event MinDifferentialRayUpdateScheduled(uint256 oldValue, uint256 newValue, uint256 effectiveAt);
+
+    /// @notice Emitted when ORACLE_ADMIN cancels a pending routing differential threshold.
+    event MinDifferentialRayUpdateCancelled(uint256 pendingValue, uint256 effectiveAt);
+
     // ── View ──────────────────────────────────────────────────────────────────
 
     /// @notice Returns the optimal vault for new deposits, using TWAR rates.
@@ -46,6 +55,9 @@ interface IDivigentYieldOracle {
     ///         Aave: utilisation below 90%. Morpho: share price >= 1 USDC (not underwater).
     function isVaultSafe(VaultType vaultType) external view returns (bool);
 
+    /// @notice Multisig allowed to tune minDifferentialRay within fixed bounds.
+    function ORACLE_ADMIN() external view returns (address);
+
     // ── Freshness ─────────────────────────────────────────────────────────────
 
     /// @notice Timestamp of the most recent successfully recorded observation.
@@ -60,9 +72,42 @@ interface IDivigentYieldOracle {
     ///         Useful for off-chain monitoring and keeper alerting.
     function lastGoodObservationAge() external view returns (uint256);
 
+    /// @notice Minimum APY differential, in ray, required for Morpho to beat Aave.
+    function minDifferentialRay() external view returns (uint256);
+
+    /// @notice Default minDifferentialRay value used at deployment.
+    function DEFAULT_MIN_DIFFERENTIAL_RAY() external view returns (uint256);
+
+    /// @notice Lowest allowed minDifferentialRay value.
+    function MIN_DIFFERENTIAL_RAY_LOWER_BOUND() external view returns (uint256);
+
+    /// @notice Highest allowed minDifferentialRay value.
+    function MIN_DIFFERENTIAL_RAY_UPPER_BOUND() external view returns (uint256);
+
+    /// @notice Delay before a pending minDifferentialRay value can be executed.
+    function MIN_DIFFERENTIAL_RAY_CHANGE_DELAY() external view returns (uint256);
+
+    /// @notice Pending minDifferentialRay value awaiting timelock execution.
+    function pendingMinDifferentialRay() external view returns (uint256);
+
+    /// @notice Timestamp when pendingMinDifferentialRay can be executed.
+    function pendingMinDifferentialRayEffectiveAt() external view returns (uint256);
+
     // ── Mutative ──────────────────────────────────────────────────────────────
 
     /// @notice Records a new rate observation if the minimum interval has elapsed.
     ///         Permissionless — anyone can call to update the TWAR.
     function recordObservation() external;
+
+    /// @notice Schedules a minimum differential threshold update within fixed bounds.
+    ///         Rescheduling a value cancels the old pending value and restarts the delay.
+    function setMinDifferentialRay(uint256 newValue) external;
+
+    /// @notice Executes a pending minDifferentialRay after its timelock.
+    /// @dev Permissionless by design: execution only applies a bounded change
+    ///      already scheduled by ORACLE_ADMIN. Admin can cancel before execution.
+    function executeMinDifferentialRay() external;
+
+    /// @notice Cancels the pending minDifferentialRay update.
+    function cancelPendingMinDifferentialRay() external;
 }

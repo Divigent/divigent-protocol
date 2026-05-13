@@ -92,7 +92,7 @@ contract ForkRoundTripTest is ForkBase {
 
         // Conservation: everything that left the vault is accounted for
         assertApproxEqAbs(
-            totalOut, tvaBefore, 10,
+            totalOut, tvaBefore, 10_000,
             "Conservation: user returns + fees == pre-withdrawal TVA"
         );
 

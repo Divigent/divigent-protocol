@@ -47,10 +47,15 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///         - Permissionless observation means any keeper, the router itself, or the SDK
 ///           can call recordObservation() to prevent staleness.
 ///
-///         Minimum re-routing differential (50 bps = 0.50%):
+///         Minimum re-routing differential (default 20 bps = 0.20%):
 ///         - Prevents unnecessary vault switches due to rate noise.
 ///         - Routing only changes when the challenger's TWAR exceeds the current
-///           vault's TWAR by at least MIN_DIFFERENTIAL_BPS basis points (annualised).
+///           vault's TWAR by at least minDifferentialRay (annualised).
+///         - ORACLE_ADMIN can tune the threshold inside hard-coded safety bounds.
+///         - Any threshold change requires a 24-hour timelock before execution.
+///         - Rescheduling a pending value cancels the prior pending value and starts
+///           a fresh 24-hour timelock. Watch the latest Scheduled event's effectiveAt,
+///           not the original one.
 ///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentYieldOracle is IDivigentYieldOracle {
@@ -79,9 +84,18 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     uint256 public constant UTILISATION_THRESHOLD_BPS = 9_000; // 90%
     uint256 public constant BPS_DENOMINATOR           = 10_000;
 
-    /// @notice Minimum APY differential (annualised, in RAY) to trigger a vault switch.
-    ///         0.50% × 1e27 (expressed in ray terms for comparison with TWAR rates).
-    uint256 public constant MIN_DIFFERENTIAL_RAY = 5e24; // 0.5% in ray
+    /// @notice Default APY differential (annualised, in RAY) used to seed minDifferentialRay.
+    ///         0.20% × 1e27 (expressed in ray terms for comparison with TWAR rates).
+    uint256 public constant DEFAULT_MIN_DIFFERENTIAL_RAY = 2e24; // 0.20% in ray
+
+    /// @notice Allowed threshold range: 10 bps (0.1%) to 100 bps (1.0%), in RAY.
+    ///         Upper bound is tight enough that no admin setting can effectively
+    ///         freeze routing on Aave under normal market conditions.
+    uint256 public constant MIN_DIFFERENTIAL_RAY_LOWER_BOUND = 1e24;  // 0.1%
+    uint256 public constant MIN_DIFFERENTIAL_RAY_UPPER_BOUND = 1e25;  // 1.0%
+
+    /// @notice Delay before a pending minDifferentialRay value can be executed.
+    uint256 public constant MIN_DIFFERENTIAL_RAY_CHANGE_DELAY = 24 hours;
 
     /// @notice Morpho share amount used for share-price sampling.
     /// @dev Uses a larger probe size to reduce USDC 6-decimal quantization in
@@ -111,7 +125,21 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice MetaMorpho vault (ERC-4626) for Morpho Steakhouse / Prime USDC.
     IMorphoVault public immutable MORPHO_VAULT;
 
+    /// @notice Multisig allowed to tune minDifferentialRay within fixed bounds.
+    address public immutable ORACLE_ADMIN;
+
     // ── TWAR State ────────────────────────────────────────────────────────────
+
+    /// @notice Minimum APY differential (annualised, in RAY) required for Morpho to win.
+    uint256 public minDifferentialRay;
+
+    /// @notice Pending minDifferentialRay value awaiting timelock execution.
+    uint256 public pendingMinDifferentialRay;
+
+    /// @notice Timestamp when pendingMinDifferentialRay can be executed.
+    /// @dev INVARIANT: pendingMinDifferentialRay > 0 iff pendingMinDifferentialRayEffectiveAt > 0.
+    ///      Zero is safe as the sentinel because valid pending values are bounded above zero.
+    uint256 public pendingMinDifferentialRayEffectiveAt;
 
     /// @dev A single checkpoint stores cumulative rate accumulators at a timestamp,
     ///      plus the Morpho share price recorded at that moment for auditability.
@@ -157,9 +185,32 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     error ZeroAToken();
     error ZeroUsdc();
     error ZeroMorphoVault();
+    error ZeroOracleAdmin();
+
+    /// @notice Reverts when a caller is not ORACLE_ADMIN.
+    error NotOracleAdmin(address caller);
+
+    /// @notice Reverts when a setter would leave the current value unchanged.
+    error NoChange();
+
+    /// @notice Reverts when no pending minDifferentialRay update exists.
+    error NoPendingMinDifferentialRay();
+
+    /// @notice Reverts when a pending minDifferentialRay update is still timelocked.
+    error MinDifferentialRayTimelockActive(uint256 effectiveAt);
+
+    /// @notice Reverts when the proposed differential is outside the allowed range.
+    error MinDifferentialRayOutOfBounds(uint256 provided, uint256 min, uint256 max);
 
     /// @notice Reverts when neither supported vault passes the oracle safety check.
     error NoSafeVault();
+
+    // ── Modifiers ────────────────────────────────────────────────────────────
+
+    modifier onlyOracleAdmin() {
+        _onlyOracleAdmin();
+        _;
+    }
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -167,21 +218,27 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @param aToken      aUSDC address on Base.
     /// @param usdc        USDC address on Base.
     /// @param morphoVault MetaMorpho USDC vault address on Base.
+    /// @param oracleAdmin Multisig allowed to update minDifferentialRay.
     constructor(
         address aavePool,
         address aToken,
         address usdc,
-        address morphoVault
+        address morphoVault,
+        address oracleAdmin
     ) {
         if (aavePool    == address(0)) revert ZeroAavePool();
         if (aToken      == address(0)) revert ZeroAToken();
         if (usdc        == address(0)) revert ZeroUsdc();
         if (morphoVault == address(0)) revert ZeroMorphoVault();
+        if (oracleAdmin == address(0)) revert ZeroOracleAdmin();
 
         AAVE_POOL    = IAaveV3Pool(aavePool);
         A_TOKEN      = IERC20(aToken);
         USDC         = IERC20(usdc);
         MORPHO_VAULT = IMorphoVault(morphoVault);
+        ORACLE_ADMIN = oracleAdmin;
+
+        minDifferentialRay = DEFAULT_MIN_DIFFERENTIAL_RAY;
 
         // Seed Aave rate from on-chain data
         aaveSpotRate = _readAaveSpotRate();
@@ -210,10 +267,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
         if (!aaveSafe && !morphoSafe) revert NoSafeVault();
 
-        // Morpho wins only if: safe AND its TWAR exceeds Aave's by MIN_DIFFERENTIAL_RAY
+        // Morpho wins only if: safe AND its TWAR exceeds Aave's by minDifferentialRay
         bool morphoWins = morphoSafe
             && (morphoTWAR > aaveTWAR)
-            && (morphoTWAR - aaveTWAR >= MIN_DIFFERENTIAL_RAY);
+            && (morphoTWAR - aaveTWAR >= minDifferentialRay);
 
         if (morphoWins || !aaveSafe) {
             return (address(MORPHO_VAULT), VaultType.MORPHO, morphoTWAR);
@@ -271,6 +328,47 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @inheritdoc IDivigentYieldOracle
     function lastGoodObservationAge() external view override returns (uint256) {
         return block.timestamp - lastObservationTime;
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
+    function setMinDifferentialRay(uint256 newValue) external override onlyOracleAdmin {
+        _validateMinDifferentialRay(newValue);
+
+        uint256 oldValue = minDifferentialRay;
+        if (newValue == oldValue) revert NoChange();
+
+        if (newValue == pendingMinDifferentialRay) revert NoChange();
+
+        _cancelPendingMinDifferentialRay();
+
+        uint256 effectiveAt = block.timestamp + MIN_DIFFERENTIAL_RAY_CHANGE_DELAY;
+        pendingMinDifferentialRay = newValue;
+        pendingMinDifferentialRayEffectiveAt = effectiveAt;
+
+        emit MinDifferentialRayUpdateScheduled(oldValue, newValue, effectiveAt);
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
+    /// @dev Permissionless by design: execution only applies a bounded change
+    ///      already scheduled by ORACLE_ADMIN. If the admin no longer wants the
+    ///      change, they can cancel it before the timelock expires.
+    function executeMinDifferentialRay() external override {
+        uint256 pendingValue = pendingMinDifferentialRay;
+        if (pendingValue == 0) revert NoPendingMinDifferentialRay();
+
+        uint256 effectiveAt = pendingMinDifferentialRayEffectiveAt;
+        if (block.timestamp < effectiveAt) revert MinDifferentialRayTimelockActive(effectiveAt);
+
+        _validateMinDifferentialRay(pendingValue);
+        _setMinDifferentialRay(pendingValue);
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
+    function cancelPendingMinDifferentialRay() external override onlyOracleAdmin {
+        uint256 pendingValue = pendingMinDifferentialRay;
+        if (pendingValue == 0) revert NoPendingMinDifferentialRay();
+
+        _cancelPendingMinDifferentialRay();
     }
 
     /// @inheritdoc IDivigentYieldOracle
@@ -341,6 +439,53 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
         lastObservationTime  = block.timestamp;
 
         emit ObservationRecorded(block.timestamp, newAaveRate, newMorphoRate);
+    }
+
+    // ── Internal: Admin Validation ───────────────────────────────────────────
+
+    /// @dev Reverts unless the caller is the immutable oracle admin.
+    function _onlyOracleAdmin() internal view {
+        if (msg.sender != ORACLE_ADMIN) revert NotOracleAdmin(msg.sender);
+    }
+
+    /// @dev Enforces the hard-coded safety bounds for minDifferentialRay.
+    function _validateMinDifferentialRay(uint256 value) internal pure {
+        if (
+            value < MIN_DIFFERENTIAL_RAY_LOWER_BOUND
+            || value > MIN_DIFFERENTIAL_RAY_UPPER_BOUND
+        ) {
+            revert MinDifferentialRayOutOfBounds(
+                value,
+                MIN_DIFFERENTIAL_RAY_LOWER_BOUND,
+                MIN_DIFFERENTIAL_RAY_UPPER_BOUND
+            );
+        }
+    }
+
+    /// @dev Applies an already-scheduled minDifferentialRay update and clears the pending slots.
+    function _setMinDifferentialRay(uint256 newValue) internal {
+        uint256 oldValue = minDifferentialRay;
+        minDifferentialRay = newValue;
+        _clearPendingMinDifferentialRay();
+
+        emit MinDifferentialRayUpdated(oldValue, newValue);
+    }
+
+    /// @dev Cancels any pending minDifferentialRay update and emits the cancellation event.
+    function _cancelPendingMinDifferentialRay() internal {
+        uint256 pendingValue = pendingMinDifferentialRay;
+        if (pendingValue == 0) return;
+
+        uint256 effectiveAt = pendingMinDifferentialRayEffectiveAt;
+        _clearPendingMinDifferentialRay();
+
+        emit MinDifferentialRayUpdateCancelled(pendingValue, effectiveAt);
+    }
+
+    /// @dev Silently clears pending state. Used by both execution and cancellation paths.
+    function _clearPendingMinDifferentialRay() internal {
+        delete pendingMinDifferentialRay;
+        delete pendingMinDifferentialRayEffectiveAt;
     }
 
     // ── Internal: Rate Reading ────────────────────────────────────────────────

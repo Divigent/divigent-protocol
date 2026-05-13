@@ -51,6 +51,9 @@ contract ForkPermitReplayTest is ForkBase {
         (uint8 v, bytes32 r, bytes32 s) = _signBasePermit(keyedKey, keyedSigner, address(router), amount, deadline);
 
         address relay = makeAddr("fork_relay");
+        vm.prank(keyedSigner);
+        router.setOperator(relay, true);
+
         uint256 signerUsdcBefore = usdc.balanceOf(keyedSigner);
         uint256 relayUsdcBefore = usdc.balanceOf(relay);
 
@@ -78,6 +81,8 @@ contract ForkPermitReplayTest is ForkBase {
         (uint8 v, bytes32 r, bytes32 s) = _signBasePermit(keyedKey, keyedSigner, address(router), amount, deadline);
 
         address relay = makeAddr("fork_relay_replay");
+        vm.prank(keyedSigner);
+        router.setOperator(relay, true);
 
         // 1st submission — succeeds
         vm.prank(relay);

@@ -65,7 +65,13 @@ contract TestBase is Test {
     }
 
     function _deployYieldOracle() internal {
-        yieldOracle = new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
+        yieldOracle = new DivigentYieldOracle(
+            address(aavePool),
+            address(aToken),
+            address(usdc),
+            address(morphoVault),
+            emergencyMultisig
+        );
     }
 
     function _deployRouterStack() internal {

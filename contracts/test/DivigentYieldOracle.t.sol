@@ -7,27 +7,35 @@ import {TestBase} from "test/TestBase.sol";
 
 contract DivigentYieldOracleTest is TestBase {
     event ObservationRecorded(uint256 indexed timestamp, uint256 aaveRate, uint256 morphoRate);
+    event MinDifferentialRayUpdated(uint256 oldValue, uint256 newValue);
+    event MinDifferentialRayUpdateScheduled(uint256 oldValue, uint256 newValue, uint256 effectiveAt);
+    event MinDifferentialRayUpdateCancelled(uint256 pendingValue, uint256 effectiveAt);
 
     // ----- Constructor tests -----------------
 
     function test_constructor_revertsIfAavePoolIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroAavePool.selector);
-        new DivigentYieldOracle(address(0), address(aToken), address(usdc), address(morphoVault));
+        new DivigentYieldOracle(address(0), address(aToken), address(usdc), address(morphoVault), emergencyMultisig);
     }
 
     function test_constructor_revertsIfATokenIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroAToken.selector);
-        new DivigentYieldOracle(address(aavePool), address(0), address(usdc), address(morphoVault));
+        new DivigentYieldOracle(address(aavePool), address(0), address(usdc), address(morphoVault), emergencyMultisig);
     }
 
     function test_constructor_revertsIfUsdcIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroUsdc.selector);
-        new DivigentYieldOracle(address(aavePool), address(aToken), address(0), address(morphoVault));
+        new DivigentYieldOracle(address(aavePool), address(aToken), address(0), address(morphoVault), emergencyMultisig);
     }
 
     function test_constructor_revertsIfMorphoVaultIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroMorphoVault.selector);
-        new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(0));
+        new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(0), emergencyMultisig);
+    }
+
+    function test_constructor_revertsIfOracleAdminIsZero() public {
+        vm.expectRevert(DivigentYieldOracle.ZeroOracleAdmin.selector);
+        new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault), address(0));
     }
 
     function test_constructor_seedsInitialOracleState() public view {
@@ -41,6 +49,12 @@ contract DivigentYieldOracleTest is TestBase {
         );
         assertEq(yieldOracle.morphoSpotRate(), 0, "Morpho spot rate should start at zero");
         assertEq(yieldOracle.lastObservationTime(), block.timestamp, "Last observation time seed mismatch");
+        assertEq(yieldOracle.ORACLE_ADMIN(), emergencyMultisig, "Oracle admin seed mismatch");
+        assertEq(
+            yieldOracle.minDifferentialRay(),
+            yieldOracle.DEFAULT_MIN_DIFFERENTIAL_RAY(),
+            "Minimum differential seed mismatch"
+        );
         assertEq(
             uint256(yieldOracle.lastOptimalVaultType()),
             uint256(IDivigentYieldOracle.VaultType.AAVE),
@@ -361,6 +375,358 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(yieldOracle.lastGoodObservationAge(), 37 minutes + 12 seconds, "Observation age mismatch");
     }
 
+    function test_setMinDifferentialRay_revertsForNonAdmin() public {
+        address caller = makeAddr("notAdmin");
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.prank(caller);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+    }
+
+    function test_setMinDifferentialRay_revertsBelowLowerBound() public {
+        uint256 belowLowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND() - 1;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DivigentYieldOracle.MinDifferentialRayOutOfBounds.selector,
+                belowLowerBound,
+                yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND(),
+                yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND()
+            )
+        );
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(belowLowerBound);
+    }
+
+    function test_setMinDifferentialRay_revertsAboveUpperBound() public {
+        uint256 aboveUpperBound = yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND() + 1;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DivigentYieldOracle.MinDifferentialRayOutOfBounds.selector,
+                aboveUpperBound,
+                yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND(),
+                yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND()
+            )
+        );
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(aboveUpperBound);
+    }
+
+    function test_setMinDifferentialRay_raiseSchedulesAndDoesNotUpdateImmediately() public {
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+        uint256 newValue = oldValue + 1e24;
+        uint256 effectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateScheduled(oldValue, newValue, effectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(newValue);
+
+        assertEq(yieldOracle.minDifferentialRay(), oldValue, "Raise should not apply immediately");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), newValue, "Pending differential mismatch");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), effectiveAt, "Pending effective time mismatch");
+    }
+
+    function test_setMinDifferentialRay_loweringSchedulesAndDoesNotUpdateImmediately() public {
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+        uint256 newValue = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 effectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateScheduled(oldValue, newValue, effectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(newValue);
+
+        assertEq(yieldOracle.minDifferentialRay(), oldValue, "Lowering should not apply immediately");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), newValue, "Pending differential mismatch");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), effectiveAt, "Pending effective time mismatch");
+    }
+
+    function test_setMinDifferentialRay_rescheduleCancelsOldPendingValue() public {
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+        uint256 firstValue = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 secondValue = firstValue + 1;
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(firstValue);
+
+        uint256 firstEffectiveAt = yieldOracle.pendingMinDifferentialRayEffectiveAt();
+        vm.warp(block.timestamp + 1 hours);
+        uint256 secondEffectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateCancelled(firstValue, firstEffectiveAt);
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateScheduled(oldValue, secondValue, secondEffectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(secondValue);
+
+        assertEq(yieldOracle.pendingMinDifferentialRay(), secondValue, "Pending differential should be replaced");
+        assertEq(
+            yieldOracle.pendingMinDifferentialRayEffectiveAt(),
+            secondEffectiveAt,
+            "Reschedule should restart delay"
+        );
+    }
+
+    function test_setMinDifferentialRay_revertsNoChange() public {
+        uint256 currentValue = yieldOracle.minDifferentialRay();
+
+        vm.expectRevert(DivigentYieldOracle.NoChange.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(currentValue);
+    }
+
+    function test_setMinDifferentialRay_revertsNoChangeForSamePendingLowerValue() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.startPrank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+        vm.expectRevert(DivigentYieldOracle.NoChange.selector);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+        vm.stopPrank();
+    }
+
+    function test_executeMinDifferentialRay_acceptsUpperBoundAfterDelay() public {
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+        uint256 upperBound = yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND();
+        uint256 effectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(upperBound);
+
+        assertEq(yieldOracle.minDifferentialRay(), oldValue, "Upper bound should not apply immediately");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), upperBound, "Upper bound should be pending");
+
+        vm.warp(effectiveAt);
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdated(oldValue, upperBound);
+
+        yieldOracle.executeMinDifferentialRay();
+
+        assertEq(
+            yieldOracle.minDifferentialRay(),
+            upperBound,
+            "Upper bound should be accepted after delay"
+        );
+        assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function test_executeMinDifferentialRay_acceptsLowerBoundAfterDelay() public {
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 effectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        vm.warp(effectiveAt - 1);
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.MinDifferentialRayTimelockActive.selector, effectiveAt));
+        yieldOracle.executeMinDifferentialRay();
+
+        vm.warp(effectiveAt);
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdated(oldValue, lowerBound);
+
+        yieldOracle.executeMinDifferentialRay();
+
+        assertEq(yieldOracle.minDifferentialRay(), lowerBound, "Lower bound should apply after delay");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function test_executeMinDifferentialRay_revertsWhenNoPendingValue() public {
+        vm.expectRevert(DivigentYieldOracle.NoPendingMinDifferentialRay.selector);
+        yieldOracle.executeMinDifferentialRay();
+    }
+
+    function test_executeMinDifferentialRay_isPermissionless() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        address caller = makeAddr("randomKeeper");
+
+        assertNotEq(caller, yieldOracle.ORACLE_ADMIN(), "Test caller must not be oracle admin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        vm.warp(yieldOracle.pendingMinDifferentialRayEffectiveAt());
+
+        vm.prank(caller);
+        yieldOracle.executeMinDifferentialRay();
+
+        assertEq(yieldOracle.minDifferentialRay(), lowerBound, "Random caller should execute pending value");
+    }
+
+    function test_executeMinDifferentialRay_revertsOnSecondCall() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        vm.warp(yieldOracle.pendingMinDifferentialRayEffectiveAt());
+        yieldOracle.executeMinDifferentialRay();
+
+        vm.expectRevert(DivigentYieldOracle.NoPendingMinDifferentialRay.selector);
+        yieldOracle.executeMinDifferentialRay();
+    }
+
+    function test_setMinDifferentialRay_multipleCycles() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 upperBound = yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND();
+        uint256 midValue = (lowerBound + upperBound) / 2;
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+        vm.warp(yieldOracle.pendingMinDifferentialRayEffectiveAt());
+        yieldOracle.executeMinDifferentialRay();
+        assertEq(yieldOracle.minDifferentialRay(), lowerBound, "Cycle 1 lower mismatch");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(upperBound);
+        vm.warp(yieldOracle.pendingMinDifferentialRayEffectiveAt());
+        yieldOracle.executeMinDifferentialRay();
+        assertEq(yieldOracle.minDifferentialRay(), upperBound, "Cycle 2 raise mismatch");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(midValue);
+        vm.warp(yieldOracle.pendingMinDifferentialRayEffectiveAt());
+        yieldOracle.executeMinDifferentialRay();
+
+        assertEq(yieldOracle.minDifferentialRay(), midValue, "Cycle 3 lower mismatch");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear after cycles");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear after cycles");
+    }
+
+    function test_cancelPendingMinDifferentialRay_revertsForNonAdmin() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        address caller = makeAddr("notAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.prank(caller);
+        yieldOracle.cancelPendingMinDifferentialRay();
+    }
+
+    function test_cancelPendingMinDifferentialRay_revertsWhenNoPendingValue() public {
+        vm.expectRevert(DivigentYieldOracle.NoPendingMinDifferentialRay.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.cancelPendingMinDifferentialRay();
+    }
+
+    function test_cancelPendingMinDifferentialRay_clearsPendingValue() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        uint256 effectiveAt = yieldOracle.pendingMinDifferentialRayEffectiveAt();
+
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateCancelled(lowerBound, effectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.cancelPendingMinDifferentialRay();
+
+        assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function testFuzz_setMinDifferentialRay_boundsValidator(uint256 value) public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 upperBound = yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND();
+        uint256 currentValue = yieldOracle.minDifferentialRay();
+
+        vm.assume(value != currentValue);
+
+        if (value < lowerBound || value > upperBound) {
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    DivigentYieldOracle.MinDifferentialRayOutOfBounds.selector,
+                    value,
+                    lowerBound,
+                    upperBound
+                )
+            );
+        }
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(value);
+    }
+
+    function test_setMinDifferentialRay_raiseReschedulesPendingValue() public {
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+        uint256 upperBound = yieldOracle.MIN_DIFFERENTIAL_RAY_UPPER_BOUND();
+        uint256 oldValue = yieldOracle.minDifferentialRay();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        uint256 firstEffectiveAt = yieldOracle.pendingMinDifferentialRayEffectiveAt();
+        vm.warp(block.timestamp + 1 hours);
+        uint256 secondEffectiveAt = block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY();
+
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateCancelled(lowerBound, firstEffectiveAt);
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdateScheduled(oldValue, upperBound, secondEffectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(upperBound);
+
+        assertEq(yieldOracle.minDifferentialRay(), oldValue, "Raised value should not apply immediately");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), upperBound, "Pending value should be replaced");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), secondEffectiveAt, "Pending delay should restart");
+
+        vm.warp(secondEffectiveAt);
+        vm.expectEmit(false, false, false, true);
+        emit MinDifferentialRayUpdated(oldValue, upperBound);
+
+        yieldOracle.executeMinDifferentialRay();
+
+        assertEq(yieldOracle.minDifferentialRay(), upperBound, "Upper bound should apply after delay");
+        assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear");
+        assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function test_setMinDifferentialRay_changesRoutingThreshold() public {
+        uint256 elapsed = 1 hours;
+        uint128 lowAaveRate = 75e23; // 0.75% APY
+
+        _recordObservationAfter(elapsed, lowAaveRate, 1_000_001);
+        vm.warp(block.timestamp + elapsed);
+
+        (address defaultVault,,) = yieldOracle.getOptimalVault();
+        assertEq(defaultVault, address(aavePool), "Default threshold should keep routing on Aave");
+
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        (address stillDefaultVault,,) = yieldOracle.getOptimalVault();
+        assertEq(stillDefaultVault, address(aavePool), "Timelocked lower threshold should not apply immediately");
+
+        vm.warp(block.timestamp + yieldOracle.MIN_DIFFERENTIAL_RAY_CHANGE_DELAY());
+        yieldOracle.executeMinDifferentialRay();
+
+        (address loweredVault, IDivigentYieldOracle.VaultType loweredVaultType,) = yieldOracle.getOptimalVault();
+
+        assertEq(loweredVault, address(morphoVault), "Lower threshold should allow Morpho to win");
+        assertEq(
+            uint256(loweredVaultType),
+            uint256(IDivigentYieldOracle.VaultType.MORPHO),
+            "Lowered threshold should route to Morpho"
+        );
+    }
+
     function test_getOptimalVault_returnsAaveWhenMorphoIsUnsafe() public {
         morphoVault.setSharePrice(999_999);
 
@@ -372,7 +738,7 @@ contract DivigentYieldOracleTest is TestBase {
     }
 
     function test_getOptimalVault_returnsAaveWhenMorphoDifferentialIsTooSmall() public {
-        uint256 elapsed = 10 minutes;
+        uint256 elapsed = 10 minutes + 30 seconds;
         uint256 smallEdgeSharePrice = 1_000_001;
 
         _recordObservationAfter(elapsed, DEFAULT_AAVE_LIQUIDITY_RATE, smallEdgeSharePrice);
@@ -464,7 +830,13 @@ contract DivigentYieldOracleTest is TestBase {
     function test_recordObservation_firstObservationBootstrap() public {
         // Deploy a fresh oracle to test the first-ever observation
         DivigentYieldOracle freshOracle =
-            new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault));
+            new DivigentYieldOracle(
+                address(aavePool),
+                address(aToken),
+                address(usdc),
+                address(morphoVault),
+                emergencyMultisig
+            );
 
         // Before any observation
         assertEq(freshOracle.morphoSpotRate(), 0, "morphoSpotRate should be 0 before first observation");
@@ -676,11 +1048,11 @@ contract DivigentYieldOracleTest is TestBase {
     function test_getOptimalVault_morphoDifferentialExactlyAtThreshold() public {
         uint256 interval = yieldOracle.MIN_OBSERVATION_INTERVAL();
 
-        // We need morphoTWAR - aaveTWAR >= MIN_DIFFERENTIAL_RAY (5e24)
+        // We need morphoTWAR - aaveTWAR >= DEFAULT_MIN_DIFFERENTIAL_RAY (2e24)
         // Set aaveRate low and morpho high to create a large differential
         // Then use a morpho price that creates exactly the right TWAR gap
         uint128 aaveRate = 0.01e27; // 1%
-        uint256 strongPrice = 1_010_000; // ~100% annualized (huge gap > 5e24)
+        uint256 strongPrice = 1_010_000; // ~100% annualized (huge gap > 2e24)
 
         _recordObservationAfter(interval, aaveRate, strongPrice);
         vm.warp(block.timestamp + interval);
@@ -691,7 +1063,7 @@ contract DivigentYieldOracleTest is TestBase {
 
         // Verify the gap is above threshold
         assertTrue(morphoTWAR > aaveTWAR, "Morpho TWAR should exceed Aave TWAR");
-        assertGe(morphoTWAR - aaveTWAR, yieldOracle.MIN_DIFFERENTIAL_RAY(), "Gap should meet threshold");
+        assertGe(morphoTWAR - aaveTWAR, yieldOracle.DEFAULT_MIN_DIFFERENTIAL_RAY(), "Gap should meet threshold");
 
         (address vault,,) = yieldOracle.getOptimalVault();
         assertEq(vault, address(morphoVault), "Morpho should win when gap meets threshold");
