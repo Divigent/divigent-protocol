@@ -144,7 +144,9 @@ USDC treasury blacklist events.
   vector.
 - **Non-upgradeable:** No proxy pattern. External integration addresses are
   immutable. The fee treasury and oracle admin are rotatable via timelocked
-  control paths.
+  control paths, with oracle-admin recovery governed by an OpenZeppelin
+  `Ownable2Step` emergency owner. Ownership renunciation is disabled so the
+  oracle-admin recovery path cannot be accidentally destroyed.
 - **Permissionless exit:** Withdrawals are never paused. The emergency
   multisig can only pause new deposits.
 - **ReentrancyGuard + CEI:** All state mutations occur before external

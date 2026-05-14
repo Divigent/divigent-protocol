@@ -85,6 +85,7 @@ contract DivigentYieldOracleMorphoBaselineTest is TestBase {
                 address(aToken),
                 address(usdc),
                 address(morphoVault),
+                emergencyMultisig,
                 emergencyMultisig
             );
         assertEq(freshOracle.lastMorphoSharePrice(), 0, "test precondition: fresh baseline is zero");

@@ -53,6 +53,7 @@ import {DvUSDC} from "../src/dvUSDC.sol";
 ///           PRIVATE_KEY          Deployer EOA private key
 ///           TREASURY             2-of-3 Gnosis Safe address for fee collection
 ///           EMERGENCY_MULTISIG   Separate multisig for deposit pause authority
+///           ORACLE_ADMIN         Separate multisig for oracle parameter administration
 ///
 ///         Optional env vars:
 ///           BASE_RPC_URL         Base mainnet RPC (default: https://mainnet.base.org)
@@ -74,6 +75,7 @@ contract DeployBase is Script {
         address deployer;
         address treasury;
         address emergencyMultisig;
+        address oracleAdmin;
         address oracle;
         address feeCollector;
         address dvUsdc;
@@ -88,13 +90,18 @@ contract DeployBase is Script {
         address deployer = vm.addr(deployerKey);
         address treasury = vm.envAddress("TREASURY");
         address emergencyMultisig = vm.envAddress("EMERGENCY_MULTISIG");
+        address oracleAdmin = vm.envAddress("ORACLE_ADMIN");
 
         require(block.chainid == 8453, "Wrong chain: must be Base Mainnet (8453)");
         require(treasury != address(0), "TREASURY must not be zero address");
         require(emergencyMultisig != address(0), "EMERGENCY_MULTISIG must not be zero address");
+        require(oracleAdmin != address(0), "ORACLE_ADMIN must not be zero address");
         require(treasury != deployer, "TREASURY must not be the deployer EOA (use a multisig)");
         require(emergencyMultisig != deployer, "EMERGENCY_MULTISIG must not be the deployer EOA");
+        require(oracleAdmin != deployer, "ORACLE_ADMIN must not be the deployer EOA");
         require(treasury != emergencyMultisig, "TREASURY and EMERGENCY_MULTISIG must be different");
+        require(oracleAdmin != emergencyMultisig, "ORACLE_ADMIN and EMERGENCY_MULTISIG must be different");
+        require(oracleAdmin != treasury, "ORACLE_ADMIN and TREASURY must be different");
 
         // ── Pre-deploy checks ────────────────────────────────────────────────
         _preDeployChecks(deployer);
@@ -105,13 +112,14 @@ contract DeployBase is Script {
         console2.log("Deployer:            ", deployer);
         console2.log("Treasury:            ", treasury);
         console2.log("Emergency Multisig:  ", emergencyMultisig);
+        console2.log("Oracle Admin:        ", oracleAdmin);
         console2.log("");
 
         vm.startBroadcast(deployerKey);
 
         // Step 1: Oracle (no Divigent dependencies)
         DivigentYieldOracle oracle = new DivigentYieldOracle(
-            AAVE_POOL, AAVE_ATOKEN, USDC, MORPHO_VAULT, emergencyMultisig
+            AAVE_POOL, AAVE_ATOKEN, USDC, MORPHO_VAULT, oracleAdmin, emergencyMultisig
         );
 
         // Step 2: Predict router address
@@ -138,13 +146,14 @@ contract DeployBase is Script {
         vm.stopBroadcast();
 
         // ── Post-deploy verification ─────────────────────────────────────────
-        _postDeployVerification(oracle, feeCollector, dvUsdc, router, treasury, emergencyMultisig);
+        _postDeployVerification(oracle, feeCollector, dvUsdc, router, treasury, emergencyMultisig, oracleAdmin);
 
         // ── Write report ─────────────────────────────────────────────────────
         DeployReport memory report = DeployReport({
             deployer: deployer,
             treasury: treasury,
             emergencyMultisig: emergencyMultisig,
+            oracleAdmin: oracleAdmin,
             oracle: address(oracle),
             feeCollector: address(feeCollector),
             dvUsdc: address(dvUsdc),
@@ -188,7 +197,8 @@ contract DeployBase is Script {
         DvUSDC dvUsdc,
         DivigentVaultRouter router,
         address treasury,
-        address emergencyMultisig
+        address emergencyMultisig,
+        address oracleAdmin
     ) internal view {
         // Wiring checks
         require(address(router.USDC()) == USDC, "Router USDC mismatch");
@@ -207,7 +217,8 @@ contract DeployBase is Script {
 
         // Oracle reads real rates
         require(oracle.lastObservationTime() > 0, "Oracle not seeded");
-        require(oracle.ORACLE_ADMIN() == emergencyMultisig, "Oracle admin mismatch");
+        require(oracle.ORACLE_ADMIN() == oracleAdmin, "Oracle admin mismatch");
+        require(oracle.owner() == emergencyMultisig, "Oracle owner mismatch");
         require(oracle.minDifferentialRay() == oracle.DEFAULT_MIN_DIFFERENTIAL_RAY(), "Oracle differential mismatch");
 
         // USDC approvals
@@ -244,6 +255,7 @@ contract DeployBase is Script {
         vm.serializeAddress(obj, "deployer", r.deployer);
         vm.serializeAddress(obj, "treasury", r.treasury);
         vm.serializeAddress(obj, "emergencyMultisig", r.emergencyMultisig);
+        vm.serializeAddress(obj, "oracleAdmin", r.oracleAdmin);
         vm.serializeAddress(obj, "usdc", USDC);
         vm.serializeAddress(obj, "aavePool", AAVE_POOL);
         vm.serializeAddress(obj, "aaveAToken", AAVE_ATOKEN);
@@ -277,6 +289,7 @@ contract DeployBase is Script {
         console2.log("Access Control:");
         console2.log("  Treasury (fees):       ", r.treasury);
         console2.log("  Emergency Multisig:    ", r.emergencyMultisig);
+        console2.log("  Oracle Admin:          ", r.oracleAdmin);
         console2.log("");
         console2.log("Next steps:");
         console2.log("  1. Verify contracts on Basescan (--verify flag)");

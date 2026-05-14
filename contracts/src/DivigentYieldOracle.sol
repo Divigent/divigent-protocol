@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IAaveV3Pool} from "./interfaces/IAaveV3Pool.sol";
 import {IMorphoVault} from "./interfaces/IMorphoVault.sol";
 import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
@@ -58,12 +60,15 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///           not the original one.
 ///
 ///         Oracle admin rotation:
-///         - ORACLE_ADMIN can propose a replacement admin through a two-step timelock.
+///         - The Ownable2Step owner, intended to be the emergency multisig, can
+///           propose a replacement ORACLE_ADMIN through a timelocked flow.
 ///         - Execution is permissionless after the delay and before the grace window expires.
-///         - The current admin can cancel a pending rotation before execution.
+///         - The owner can cancel a pending rotation before execution.
+///         - Ownership itself uses OpenZeppelin Ownable2Step to avoid single-step
+///           transfer mistakes for the emergency authority.
 ///
 /// @custom:security-contact security@divigent.xyz
-contract DivigentYieldOracle is IDivigentYieldOracle {
+contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
 
     // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -137,7 +142,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice MetaMorpho vault (ERC-4626) for Morpho Steakhouse / Prime USDC.
     IMorphoVault public immutable MORPHO_VAULT;
 
-    /// @notice Multisig allowed to tune minDifferentialRay and rotate admin control.
+    /// @notice Operational admin allowed to tune minDifferentialRay.
+    /// @dev Rotation of this role is controlled by owner(), expected to be the
+    ///      emergency multisig, so loss or compromise of ORACLE_ADMIN does not
+    ///      prevent recovery.
     address public ORACLE_ADMIN;
 
     // ── TWAR State ────────────────────────────────────────────────────────────
@@ -235,6 +243,9 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice Reverts when a second oracle-admin rotation is proposed before the first resolves.
     error OracleAdminRotationAlreadyPending(address pendingAdmin);
 
+    /// @notice Reverts because the emergency owner is the oracle-admin recovery path.
+    error OwnershipRenouncementDisabled();
+
     // ── Modifiers ────────────────────────────────────────────────────────────
 
     modifier onlyOracleAdmin() {
@@ -248,14 +259,18 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @param aToken      aUSDC address on Base.
     /// @param usdc        USDC address on Base.
     /// @param morphoVault MetaMorpho USDC vault address on Base.
-    /// @param oracleAdmin Multisig allowed to update minDifferentialRay.
+    /// @param oracleAdmin Operational admin allowed to update minDifferentialRay.
+    /// @param emergencyOwner Emergency owner allowed to rotate ORACLE_ADMIN.
     constructor(
         address aavePool,
         address aToken,
         address usdc,
         address morphoVault,
-        address oracleAdmin
-    ) {
+        address oracleAdmin,
+        address emergencyOwner
+    )
+        Ownable(emergencyOwner)
+    {
         if (aavePool    == address(0)) revert ZeroAavePool();
         if (aToken      == address(0)) revert ZeroAToken();
         if (usdc        == address(0)) revert ZeroUsdc();
@@ -402,7 +417,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function proposeOracleAdminRotation(address newAdmin) external override onlyOracleAdmin {
+    function proposeOracleAdminRotation(address newAdmin) external override onlyOwner {
         if (newAdmin == address(0)) revert ZeroOracleAdmin();
         if (newAdmin == ORACLE_ADMIN) revert NoChange();
         if (pendingOracleAdmin != address(0)) {
@@ -438,13 +453,18 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function cancelOracleAdminRotation() external override onlyOracleAdmin {
+    function cancelOracleAdminRotation() external override onlyOwner {
         if (pendingOracleAdmin == address(0)) revert OracleAdminRotationNotProposed();
 
         address cancelled = pendingOracleAdmin;
         _clearPendingOracleAdminRotation();
 
         emit OracleAdminRotationCancelled(cancelled);
+    }
+
+    /// @notice Disabled to preserve the emergency recovery path for ORACLE_ADMIN.
+    function renounceOwnership() public pure override {
+        revert OwnershipRenouncementDisabled();
     }
 
     /// @inheritdoc IDivigentYieldOracle

@@ -35,14 +35,14 @@ interface IDivigentYieldOracle {
     /// @notice Emitted when ORACLE_ADMIN cancels a pending routing differential threshold.
     event MinDifferentialRayUpdateCancelled(uint256 pendingValue, uint256 effectiveAt);
 
-    /// @notice Emitted when ORACLE_ADMIN schedules an oracle-admin rotation.
+    /// @notice Emitted when the emergency owner schedules an oracle-admin rotation.
     event OracleAdminRotationProposed(
         address indexed currentAdmin,
         address indexed pendingAdmin,
         uint256 effectiveAt
     );
 
-    /// @notice Emitted when ORACLE_ADMIN cancels a pending oracle-admin rotation.
+    /// @notice Emitted when the emergency owner cancels a pending oracle-admin rotation.
     event OracleAdminRotationCancelled(address indexed cancelledPendingAdmin);
 
     /// @notice Emitted when the oracle-admin rotation executes.
@@ -68,7 +68,7 @@ interface IDivigentYieldOracle {
     ///         Aave: utilisation below 90%. Morpho: share price >= 1 USDC (not underwater).
     function isVaultSafe(VaultType vaultType) external view returns (bool);
 
-    /// @notice Current multisig allowed to tune minDifferentialRay and schedule admin rotation.
+    /// @notice Current operational admin allowed to tune minDifferentialRay.
     function ORACLE_ADMIN() external view returns (address);
 
     // ── Freshness ─────────────────────────────────────────────────────────────
@@ -137,13 +137,16 @@ interface IDivigentYieldOracle {
     function cancelPendingMinDifferentialRay() external;
 
     /// @notice Proposes rotating ORACLE_ADMIN to `newAdmin` after a timelock.
+    /// @dev Restricted to owner(), expected to be the emergency multisig.
     function proposeOracleAdminRotation(address newAdmin) external;
 
     /// @notice Executes a pending oracle-admin rotation after its timelock.
     /// @dev Permissionless by design: execution only applies a rotation already
-    ///      scheduled by ORACLE_ADMIN. Admin can cancel before execution.
+    ///      scheduled by owner(). Owner can cancel before execution.
     function executeOracleAdminRotation() external;
 
     /// @notice Cancels the pending oracle-admin rotation.
+    /// @dev Restricted to owner(), expected to be the emergency multisig.
     function cancelOracleAdminRotation() external;
+
 }
