@@ -49,3 +49,4 @@ contracts/slither-router.json
 node_modules/
 dist/
 docs
+gitbook/

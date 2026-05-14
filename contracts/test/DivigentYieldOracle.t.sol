@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {DivigentYieldOracle} from "../src/DivigentYieldOracle.sol";
 import {IDivigentYieldOracle} from "../src/interfaces/IDivigentYieldOracle.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {TestBase} from "test/TestBase.sol";
 
 contract DivigentYieldOracleTest is TestBase {
@@ -18,27 +19,44 @@ contract DivigentYieldOracleTest is TestBase {
 
     function test_constructor_revertsIfAavePoolIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroAavePool.selector);
-        new DivigentYieldOracle(address(0), address(aToken), address(usdc), address(morphoVault), emergencyMultisig);
+        new DivigentYieldOracle(
+            address(0), address(aToken), address(usdc), address(morphoVault), emergencyMultisig, emergencyMultisig
+        );
     }
 
     function test_constructor_revertsIfATokenIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroAToken.selector);
-        new DivigentYieldOracle(address(aavePool), address(0), address(usdc), address(morphoVault), emergencyMultisig);
+        new DivigentYieldOracle(
+            address(aavePool), address(0), address(usdc), address(morphoVault), emergencyMultisig, emergencyMultisig
+        );
     }
 
     function test_constructor_revertsIfUsdcIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroUsdc.selector);
-        new DivigentYieldOracle(address(aavePool), address(aToken), address(0), address(morphoVault), emergencyMultisig);
+        new DivigentYieldOracle(
+            address(aavePool), address(aToken), address(0), address(morphoVault), emergencyMultisig, emergencyMultisig
+        );
     }
 
     function test_constructor_revertsIfMorphoVaultIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroMorphoVault.selector);
-        new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(0), emergencyMultisig);
+        new DivigentYieldOracle(
+            address(aavePool), address(aToken), address(usdc), address(0), emergencyMultisig, emergencyMultisig
+        );
     }
 
     function test_constructor_revertsIfOracleAdminIsZero() public {
         vm.expectRevert(DivigentYieldOracle.ZeroOracleAdmin.selector);
-        new DivigentYieldOracle(address(aavePool), address(aToken), address(usdc), address(morphoVault), address(0));
+        new DivigentYieldOracle(
+            address(aavePool), address(aToken), address(usdc), address(morphoVault), address(0), emergencyMultisig
+        );
+    }
+
+    function test_constructor_revertsIfEmergencyOwnerIsZero() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        new DivigentYieldOracle(
+            address(aavePool), address(aToken), address(usdc), address(morphoVault), emergencyMultisig, address(0)
+        );
     }
 
     function test_constructor_seedsInitialOracleState() public view {
@@ -53,6 +71,7 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(yieldOracle.morphoSpotRate(), 0, "Morpho spot rate should start at zero");
         assertEq(yieldOracle.lastObservationTime(), block.timestamp, "Last observation time seed mismatch");
         assertEq(yieldOracle.ORACLE_ADMIN(), emergencyMultisig, "Oracle admin seed mismatch");
+        assertEq(yieldOracle.owner(), emergencyMultisig, "Emergency owner seed mismatch");
         assertEq(
             yieldOracle.minDifferentialRay(),
             yieldOracle.DEFAULT_MIN_DIFFERENTIAL_RAY(),
@@ -63,6 +82,33 @@ contract DivigentYieldOracleTest is TestBase {
             uint256(IDivigentYieldOracle.VaultType.AAVE),
             "Default vault type mismatch"
         );
+    }
+
+    function test_emergencyOwnerTransfer_usesOwnable2Step() public {
+        address newOwner = makeAddr("newEmergencyOwner");
+        address wrongCaller = makeAddr("wrongCaller");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.transferOwnership(newOwner);
+
+        assertEq(yieldOracle.owner(), emergencyMultisig, "Ownership should not move before acceptance");
+        assertEq(yieldOracle.pendingOwner(), newOwner, "Pending owner mismatch");
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, wrongCaller));
+        vm.prank(wrongCaller);
+        yieldOracle.acceptOwnership();
+
+        vm.prank(newOwner);
+        yieldOracle.acceptOwnership();
+
+        assertEq(yieldOracle.owner(), newOwner, "New owner should accept ownership");
+        assertEq(yieldOracle.pendingOwner(), address(0), "Pending owner should clear after acceptance");
+    }
+
+    function test_renounceOwnership_isDisabled() public {
+        vm.expectRevert(DivigentYieldOracle.OwnershipRenouncementDisabled.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.renounceOwnership();
     }
 
     // ----- recordObservation tests -----------------
@@ -642,13 +688,38 @@ contract DivigentYieldOracleTest is TestBase {
         assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
     }
 
-    function test_proposeOracleAdminRotation_revertsForNonAdmin() public {
+    function test_proposeOracleAdminRotation_revertsForNonOwner() public {
         address caller = makeAddr("notAdmin");
         address newAdmin = makeAddr("newOracleAdmin");
 
-        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
         vm.prank(caller);
         yieldOracle.proposeOracleAdminRotation(newAdmin);
+    }
+
+    function test_proposeOracleAdminRotation_isControlledByEmergencyOwnerNotOracleAdmin() public {
+        address oracleAdmin = makeAddr("oracleAdmin");
+        address recoveryOwner = makeAddr("recoveryOwner");
+        address newAdmin = makeAddr("newOracleAdmin");
+
+        DivigentYieldOracle recoveryOracle = new DivigentYieldOracle(
+            address(aavePool),
+            address(aToken),
+            address(usdc),
+            address(morphoVault),
+            oracleAdmin,
+            recoveryOwner
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, oracleAdmin));
+        vm.prank(oracleAdmin);
+        recoveryOracle.proposeOracleAdminRotation(newAdmin);
+
+        vm.prank(recoveryOwner);
+        recoveryOracle.proposeOracleAdminRotation(newAdmin);
+
+        assertEq(recoveryOracle.ORACLE_ADMIN(), oracleAdmin, "Rotation should not execute immediately");
+        assertEq(recoveryOracle.pendingOracleAdmin(), newAdmin, "Owner should schedule replacement admin");
     }
 
     function test_proposeOracleAdminRotation_revertsForZeroAdmin() public {
@@ -692,14 +763,14 @@ contract DivigentYieldOracleTest is TestBase {
         yieldOracle.proposeOracleAdminRotation(secondAdmin);
     }
 
-    function test_cancelOracleAdminRotation_revertsForNonAdmin() public {
+    function test_cancelOracleAdminRotation_revertsForNonOwner() public {
         address newAdmin = makeAddr("newOracleAdmin");
         address caller = makeAddr("notAdmin");
 
         vm.prank(emergencyMultisig);
         yieldOracle.proposeOracleAdminRotation(newAdmin);
 
-        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
         vm.prank(caller);
         yieldOracle.cancelOracleAdminRotation();
     }
@@ -797,6 +868,25 @@ contract DivigentYieldOracleTest is TestBase {
         yieldOracle.setMinDifferentialRay(lowerBound);
 
         assertEq(yieldOracle.pendingMinDifferentialRay(), lowerBound, "New admin should control oracle params");
+    }
+
+    function test_ownerCanScheduleSecondAdminRotationAfterOperationalAdminChanges() public {
+        address firstAdmin = makeAddr("firstOracleAdmin");
+        address secondAdmin = makeAddr("secondOracleAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(firstAdmin);
+
+        vm.warp(yieldOracle.oracleAdminRotationEffectiveAt());
+        yieldOracle.executeOracleAdminRotation();
+
+        assertEq(yieldOracle.ORACLE_ADMIN(), firstAdmin, "First admin should apply");
+        assertEq(yieldOracle.owner(), emergencyMultisig, "Emergency owner should remain unchanged");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(secondAdmin);
+
+        assertEq(yieldOracle.pendingOracleAdmin(), secondAdmin, "Owner should retain recovery authority");
     }
 
     function testFuzz_setMinDifferentialRay_boundsValidator(uint256 value) public {
@@ -995,6 +1085,7 @@ contract DivigentYieldOracleTest is TestBase {
                 address(aToken),
                 address(usdc),
                 address(morphoVault),
+                emergencyMultisig,
                 emergencyMultisig
             );
 

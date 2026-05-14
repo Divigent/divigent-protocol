@@ -32,6 +32,7 @@ contract OracleEdgeCasesTest is Actions {
             address(aToken),
             address(usdc),
             address(morphoVault),
+            emergencyMultisig,
             emergencyMultisig
         );
     }
