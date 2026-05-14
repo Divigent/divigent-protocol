@@ -10,6 +10,9 @@ contract DivigentYieldOracleTest is TestBase {
     event MinDifferentialRayUpdated(uint256 oldValue, uint256 newValue);
     event MinDifferentialRayUpdateScheduled(uint256 oldValue, uint256 newValue, uint256 effectiveAt);
     event MinDifferentialRayUpdateCancelled(uint256 pendingValue, uint256 effectiveAt);
+    event OracleAdminRotationProposed(address indexed currentAdmin, address indexed pendingAdmin, uint256 effectiveAt);
+    event OracleAdminRotationCancelled(address indexed cancelledPendingAdmin);
+    event OracleAdminUpdated(address indexed oldAdmin, address indexed newAdmin);
 
     // ----- Constructor tests -----------------
 
@@ -637,6 +640,163 @@ contract DivigentYieldOracleTest is TestBase {
 
         assertEq(yieldOracle.pendingMinDifferentialRay(), 0, "Pending value should clear");
         assertEq(yieldOracle.pendingMinDifferentialRayEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function test_proposeOracleAdminRotation_revertsForNonAdmin() public {
+        address caller = makeAddr("notAdmin");
+        address newAdmin = makeAddr("newOracleAdmin");
+
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.prank(caller);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+    }
+
+    function test_proposeOracleAdminRotation_revertsForZeroAdmin() public {
+        vm.expectRevert(DivigentYieldOracle.ZeroOracleAdmin.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(address(0));
+    }
+
+    function test_proposeOracleAdminRotation_revertsForCurrentAdmin() public {
+        vm.expectRevert(DivigentYieldOracle.NoChange.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(emergencyMultisig);
+    }
+
+    function test_proposeOracleAdminRotation_schedulesAndDoesNotUpdateImmediately() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+        uint256 effectiveAt = block.timestamp + yieldOracle.ORACLE_ADMIN_ROTATION_DELAY();
+
+        vm.expectEmit(true, true, false, true);
+        emit OracleAdminRotationProposed(emergencyMultisig, newAdmin, effectiveAt);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        assertEq(yieldOracle.ORACLE_ADMIN(), emergencyMultisig, "Admin should not rotate immediately");
+        assertEq(yieldOracle.pendingOracleAdmin(), newAdmin, "Pending admin mismatch");
+        assertEq(yieldOracle.oracleAdminRotationEffectiveAt(), effectiveAt, "Pending effective time mismatch");
+    }
+
+    function test_proposeOracleAdminRotation_revertsWhenRotationAlreadyPending() public {
+        address firstAdmin = makeAddr("firstOracleAdmin");
+        address secondAdmin = makeAddr("secondOracleAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(firstAdmin);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(DivigentYieldOracle.OracleAdminRotationAlreadyPending.selector, firstAdmin)
+        );
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(secondAdmin);
+    }
+
+    function test_cancelOracleAdminRotation_revertsForNonAdmin() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+        address caller = makeAddr("notAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, caller));
+        vm.prank(caller);
+        yieldOracle.cancelOracleAdminRotation();
+    }
+
+    function test_cancelOracleAdminRotation_revertsWhenNoPendingRotation() public {
+        vm.expectRevert(DivigentYieldOracle.OracleAdminRotationNotProposed.selector);
+        vm.prank(emergencyMultisig);
+        yieldOracle.cancelOracleAdminRotation();
+    }
+
+    function test_cancelOracleAdminRotation_clearsPendingRotation() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        vm.expectEmit(true, false, false, true);
+        emit OracleAdminRotationCancelled(newAdmin);
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.cancelOracleAdminRotation();
+
+        assertEq(yieldOracle.ORACLE_ADMIN(), emergencyMultisig, "Current admin should remain unchanged");
+        assertEq(yieldOracle.pendingOracleAdmin(), address(0), "Pending admin should clear");
+        assertEq(yieldOracle.oracleAdminRotationEffectiveAt(), 0, "Pending timestamp should clear");
+    }
+
+    function test_executeOracleAdminRotation_revertsWhenNoPendingRotation() public {
+        vm.expectRevert(DivigentYieldOracle.OracleAdminRotationNotProposed.selector);
+        yieldOracle.executeOracleAdminRotation();
+    }
+
+    function test_executeOracleAdminRotation_revertsBeforeDelay() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+        uint256 effectiveAt = block.timestamp + yieldOracle.ORACLE_ADMIN_ROTATION_DELAY();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        vm.warp(effectiveAt - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DivigentYieldOracle.OracleAdminRotationNotReady.selector,
+                block.timestamp,
+                effectiveAt
+            )
+        );
+        yieldOracle.executeOracleAdminRotation();
+    }
+
+    function test_executeOracleAdminRotation_revertsAfterGracePeriod() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        uint256 expiredAt =
+            yieldOracle.oracleAdminRotationEffectiveAt() + yieldOracle.ORACLE_ADMIN_ROTATION_GRACE_PERIOD();
+        vm.warp(expiredAt + 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DivigentYieldOracle.OracleAdminRotationExpired.selector,
+                block.timestamp,
+                expiredAt
+            )
+        );
+        yieldOracle.executeOracleAdminRotation();
+    }
+
+    function test_executeOracleAdminRotation_isPermissionlessAndTransfersControl() public {
+        address newAdmin = makeAddr("newOracleAdmin");
+        address keeper = makeAddr("keeper");
+        uint256 lowerBound = yieldOracle.MIN_DIFFERENTIAL_RAY_LOWER_BOUND();
+
+        vm.prank(emergencyMultisig);
+        yieldOracle.proposeOracleAdminRotation(newAdmin);
+
+        vm.warp(yieldOracle.oracleAdminRotationEffectiveAt());
+        vm.expectEmit(true, true, false, true);
+        emit OracleAdminUpdated(emergencyMultisig, newAdmin);
+
+        vm.prank(keeper);
+        yieldOracle.executeOracleAdminRotation();
+
+        assertEq(yieldOracle.ORACLE_ADMIN(), newAdmin, "Oracle admin should rotate");
+        assertEq(yieldOracle.pendingOracleAdmin(), address(0), "Pending admin should clear");
+        assertEq(yieldOracle.oracleAdminRotationEffectiveAt(), 0, "Pending timestamp should clear");
+
+        vm.expectRevert(abi.encodeWithSelector(DivigentYieldOracle.NotOracleAdmin.selector, emergencyMultisig));
+        vm.prank(emergencyMultisig);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        vm.prank(newAdmin);
+        yieldOracle.setMinDifferentialRay(lowerBound);
+
+        assertEq(yieldOracle.pendingMinDifferentialRay(), lowerBound, "New admin should control oracle params");
     }
 
     function testFuzz_setMinDifferentialRay_boundsValidator(uint256 value) public {
