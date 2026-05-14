@@ -57,6 +57,11 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///           a fresh 24-hour timelock. Watch the latest Scheduled event's effectiveAt,
 ///           not the original one.
 ///
+///         Oracle admin rotation:
+///         - ORACLE_ADMIN can propose a replacement admin through a two-step timelock.
+///         - Execution is permissionless after the delay and before the grace window expires.
+///         - The current admin can cancel a pending rotation before execution.
+///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentYieldOracle is IDivigentYieldOracle {
 
@@ -97,6 +102,13 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice Delay before a pending minDifferentialRay value can be executed.
     uint256 public constant MIN_DIFFERENTIAL_RAY_CHANGE_DELAY = 24 hours;
 
+    /// @notice Delay before a pending oracle-admin rotation can be executed.
+    uint256 public constant ORACLE_ADMIN_ROTATION_DELAY = 7 days;
+
+    /// @notice Window after the delay elapses during which a pending oracle-admin
+    ///         rotation can still be executed; past this window it expires.
+    uint256 public constant ORACLE_ADMIN_ROTATION_GRACE_PERIOD = 14 days;
+
     /// @notice Morpho share amount used for share-price sampling.
     /// @dev Uses a larger probe size to reduce USDC 6-decimal quantization in
     ///      per-interval rate calculations.
@@ -125,8 +137,8 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @notice MetaMorpho vault (ERC-4626) for Morpho Steakhouse / Prime USDC.
     IMorphoVault public immutable MORPHO_VAULT;
 
-    /// @notice Multisig allowed to tune minDifferentialRay within fixed bounds.
-    address public immutable ORACLE_ADMIN;
+    /// @notice Multisig allowed to tune minDifferentialRay and rotate admin control.
+    address public ORACLE_ADMIN;
 
     // ── TWAR State ────────────────────────────────────────────────────────────
 
@@ -140,6 +152,12 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     /// @dev INVARIANT: pendingMinDifferentialRay > 0 iff pendingMinDifferentialRayEffectiveAt > 0.
     ///      Zero is safe as the sentinel because valid pending values are bounded above zero.
     uint256 public pendingMinDifferentialRayEffectiveAt;
+
+    /// @notice Pending replacement oracle admin, or address(0) when no rotation is pending.
+    address public pendingOracleAdmin;
+
+    /// @notice Earliest timestamp at which pendingOracleAdmin can be executed.
+    uint256 public oracleAdminRotationEffectiveAt;
 
     /// @dev A single checkpoint stores cumulative rate accumulators at a timestamp,
     ///      plus the Morpho share price recorded at that moment for auditability.
@@ -204,6 +222,18 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
     /// @notice Reverts when neither supported vault passes the oracle safety check.
     error NoSafeVault();
+
+    /// @notice Reverts when no pending oracle-admin rotation exists.
+    error OracleAdminRotationNotProposed();
+
+    /// @notice Reverts when an oracle-admin rotation is still timelocked.
+    error OracleAdminRotationNotReady(uint256 currentTime, uint256 effectiveAt);
+
+    /// @notice Reverts when an oracle-admin rotation is past its grace window.
+    error OracleAdminRotationExpired(uint256 currentTime, uint256 expiredAt);
+
+    /// @notice Reverts when a second oracle-admin rotation is proposed before the first resolves.
+    error OracleAdminRotationAlreadyPending(address pendingAdmin);
 
     // ── Modifiers ────────────────────────────────────────────────────────────
 
@@ -372,6 +402,52 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     }
 
     /// @inheritdoc IDivigentYieldOracle
+    function proposeOracleAdminRotation(address newAdmin) external override onlyOracleAdmin {
+        if (newAdmin == address(0)) revert ZeroOracleAdmin();
+        if (newAdmin == ORACLE_ADMIN) revert NoChange();
+        if (pendingOracleAdmin != address(0)) {
+            revert OracleAdminRotationAlreadyPending(pendingOracleAdmin);
+        }
+
+        pendingOracleAdmin = newAdmin;
+        oracleAdminRotationEffectiveAt = block.timestamp + ORACLE_ADMIN_ROTATION_DELAY;
+
+        emit OracleAdminRotationProposed(ORACLE_ADMIN, newAdmin, oracleAdminRotationEffectiveAt);
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
+    function executeOracleAdminRotation() external override {
+        address newAdmin = pendingOracleAdmin;
+        if (newAdmin == address(0)) revert OracleAdminRotationNotProposed();
+
+        uint256 effectiveAt = oracleAdminRotationEffectiveAt;
+        if (block.timestamp < effectiveAt) {
+            revert OracleAdminRotationNotReady(block.timestamp, effectiveAt);
+        }
+
+        uint256 expiredAt = effectiveAt + ORACLE_ADMIN_ROTATION_GRACE_PERIOD;
+        if (block.timestamp > expiredAt) {
+            revert OracleAdminRotationExpired(block.timestamp, expiredAt);
+        }
+
+        address oldAdmin = ORACLE_ADMIN;
+        ORACLE_ADMIN = newAdmin;
+        _clearPendingOracleAdminRotation();
+
+        emit OracleAdminUpdated(oldAdmin, newAdmin);
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
+    function cancelOracleAdminRotation() external override onlyOracleAdmin {
+        if (pendingOracleAdmin == address(0)) revert OracleAdminRotationNotProposed();
+
+        address cancelled = pendingOracleAdmin;
+        _clearPendingOracleAdminRotation();
+
+        emit OracleAdminRotationCancelled(cancelled);
+    }
+
+    /// @inheritdoc IDivigentYieldOracle
     /// @dev Permissionless — anyone can call. No state is changed if the minimum
     ///      interval has not elapsed. This design prevents a single actor from
     ///      withholding oracle updates to manipulate routing decisions.
@@ -443,7 +519,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
 
     // ── Internal: Admin Validation ───────────────────────────────────────────
 
-    /// @dev Reverts unless the caller is the immutable oracle admin.
+    /// @dev Reverts unless the caller is the current oracle admin.
     function _onlyOracleAdmin() internal view {
         if (msg.sender != ORACLE_ADMIN) revert NotOracleAdmin(msg.sender);
     }
@@ -486,6 +562,12 @@ contract DivigentYieldOracle is IDivigentYieldOracle {
     function _clearPendingMinDifferentialRay() internal {
         delete pendingMinDifferentialRay;
         delete pendingMinDifferentialRayEffectiveAt;
+    }
+
+    /// @dev Clears pending oracle-admin rotation state.
+    function _clearPendingOracleAdminRotation() internal {
+        delete pendingOracleAdmin;
+        delete oracleAdminRotationEffectiveAt;
     }
 
     // ── Internal: Rate Reading ────────────────────────────────────────────────

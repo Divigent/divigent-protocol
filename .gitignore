@@ -48,3 +48,4 @@ contracts/slither-router.json
 # Node / JS (if you add a frontend later)
 node_modules/
 dist/
+docs

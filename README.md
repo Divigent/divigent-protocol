@@ -142,8 +142,9 @@ USDC treasury blacklist events.
 - **Non-custodial:** Router holds zero USDC between transactions. aTokens
   and Morpho shares are immutable contract claims with no admin steal
   vector.
-- **Non-upgradeable:** No proxy pattern. All contract addresses are
-  immutable except the treasury address (timelocked rotation only).
+- **Non-upgradeable:** No proxy pattern. External integration addresses are
+  immutable. The fee treasury and oracle admin are rotatable via timelocked
+  control paths.
 - **Permissionless exit:** Withdrawals are never paused. The emergency
   multisig can only pause new deposits.
 - **ReentrancyGuard + CEI:** All state mutations occur before external

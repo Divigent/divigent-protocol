@@ -35,6 +35,19 @@ interface IDivigentYieldOracle {
     /// @notice Emitted when ORACLE_ADMIN cancels a pending routing differential threshold.
     event MinDifferentialRayUpdateCancelled(uint256 pendingValue, uint256 effectiveAt);
 
+    /// @notice Emitted when ORACLE_ADMIN schedules an oracle-admin rotation.
+    event OracleAdminRotationProposed(
+        address indexed currentAdmin,
+        address indexed pendingAdmin,
+        uint256 effectiveAt
+    );
+
+    /// @notice Emitted when ORACLE_ADMIN cancels a pending oracle-admin rotation.
+    event OracleAdminRotationCancelled(address indexed cancelledPendingAdmin);
+
+    /// @notice Emitted when the oracle-admin rotation executes.
+    event OracleAdminUpdated(address indexed oldAdmin, address indexed newAdmin);
+
     // ── View ──────────────────────────────────────────────────────────────────
 
     /// @notice Returns the optimal vault for new deposits, using TWAR rates.
@@ -55,7 +68,7 @@ interface IDivigentYieldOracle {
     ///         Aave: utilisation below 90%. Morpho: share price >= 1 USDC (not underwater).
     function isVaultSafe(VaultType vaultType) external view returns (bool);
 
-    /// @notice Multisig allowed to tune minDifferentialRay within fixed bounds.
+    /// @notice Current multisig allowed to tune minDifferentialRay and schedule admin rotation.
     function ORACLE_ADMIN() external view returns (address);
 
     // ── Freshness ─────────────────────────────────────────────────────────────
@@ -93,6 +106,18 @@ interface IDivigentYieldOracle {
     /// @notice Timestamp when pendingMinDifferentialRay can be executed.
     function pendingMinDifferentialRayEffectiveAt() external view returns (uint256);
 
+    /// @notice Delay before a pending oracle-admin rotation can be executed.
+    function ORACLE_ADMIN_ROTATION_DELAY() external view returns (uint256);
+
+    /// @notice Grace window after the delay during which an oracle-admin rotation can execute.
+    function ORACLE_ADMIN_ROTATION_GRACE_PERIOD() external view returns (uint256);
+
+    /// @notice Pending replacement oracle admin, or address(0) if none is pending.
+    function pendingOracleAdmin() external view returns (address);
+
+    /// @notice Timestamp when pendingOracleAdmin can be executed.
+    function oracleAdminRotationEffectiveAt() external view returns (uint256);
+
     // ── Mutative ──────────────────────────────────────────────────────────────
 
     /// @notice Records a new rate observation if the minimum interval has elapsed.
@@ -110,4 +135,15 @@ interface IDivigentYieldOracle {
 
     /// @notice Cancels the pending minDifferentialRay update.
     function cancelPendingMinDifferentialRay() external;
+
+    /// @notice Proposes rotating ORACLE_ADMIN to `newAdmin` after a timelock.
+    function proposeOracleAdminRotation(address newAdmin) external;
+
+    /// @notice Executes a pending oracle-admin rotation after its timelock.
+    /// @dev Permissionless by design: execution only applies a rotation already
+    ///      scheduled by ORACLE_ADMIN. Admin can cancel before execution.
+    function executeOracleAdminRotation() external;
+
+    /// @notice Cancels the pending oracle-admin rotation.
+    function cancelOracleAdminRotation() external;
 }
