@@ -53,19 +53,21 @@ import {IDivigentYieldOracle} from "./interfaces/IDivigentYieldOracle.sol";
 ///         - Prevents unnecessary vault switches due to rate noise.
 ///         - Routing only changes when the challenger's TWAR exceeds the current
 ///           vault's TWAR by at least minDifferentialRay (annualised).
-///         - ORACLE_ADMIN can tune the threshold inside hard-coded safety bounds.
+///         - owner() can tune the threshold inside hard-coded safety bounds.
 ///         - Any threshold change requires a 24-hour timelock before execution.
 ///         - Rescheduling a pending value cancels the prior pending value and starts
 ///           a fresh 24-hour timelock. Watch the latest Scheduled event's effectiveAt,
 ///           not the original one.
 ///
-///         Oracle admin rotation:
-///         - The Ownable2Step owner, intended to be the emergency multisig, can
-///           propose a replacement ORACLE_ADMIN through a timelocked flow.
-///         - Execution is permissionless after the delay and before the grace window expires.
-///         - The owner can cancel a pending rotation before execution.
-///         - Ownership itself uses OpenZeppelin Ownable2Step to avoid single-step
-///           transfer mistakes for the emergency authority.
+///         Admin model:
+///         - The contract exposes a single `Ownable2Step` admin role. The deployer is
+///           expected to pass the same 2-of-3 emergency multisig used elsewhere in the
+///           protocol. Authority is intentionally narrow: setting `minDifferentialRay`
+///           within `[0.1%, 1.0%]` and cancelling a pending value. No path lets the
+///           admin move assets, redirect deposits, or alter the routing logic itself.
+///         - Ownership uses `Ownable2Step` so transfers require explicit acceptance.
+///         - `renounceOwnership()` is disabled so the admin role cannot be accidentally
+///           destroyed.
 ///
 /// @custom:security-contact security@divigent.xyz
 contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
@@ -107,13 +109,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     /// @notice Delay before a pending minDifferentialRay value can be executed.
     uint256 public constant MIN_DIFFERENTIAL_RAY_CHANGE_DELAY = 24 hours;
 
-    /// @notice Delay before a pending oracle-admin rotation can be executed.
-    uint256 public constant ORACLE_ADMIN_ROTATION_DELAY = 7 days;
-
-    /// @notice Window after the delay elapses during which a pending oracle-admin
-    ///         rotation can still be executed; past this window it expires.
-    uint256 public constant ORACLE_ADMIN_ROTATION_GRACE_PERIOD = 14 days;
-
     /// @notice Morpho share amount used for share-price sampling.
     /// @dev Uses a larger probe size to reduce USDC 6-decimal quantization in
     ///      per-interval rate calculations.
@@ -142,12 +137,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     /// @notice MetaMorpho vault (ERC-4626) for Morpho Steakhouse / Prime USDC.
     IMorphoVault public immutable MORPHO_VAULT;
 
-    /// @notice Operational admin allowed to tune minDifferentialRay.
-    /// @dev Rotation of this role is controlled by owner(), expected to be the
-    ///      emergency multisig, so loss or compromise of ORACLE_ADMIN does not
-    ///      prevent recovery.
-    address public ORACLE_ADMIN;
-
     // ── TWAR State ────────────────────────────────────────────────────────────
 
     /// @notice Minimum APY differential (annualised, in RAY) required for Morpho to win.
@@ -160,12 +149,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     /// @dev INVARIANT: pendingMinDifferentialRay > 0 iff pendingMinDifferentialRayEffectiveAt > 0.
     ///      Zero is safe as the sentinel because valid pending values are bounded above zero.
     uint256 public pendingMinDifferentialRayEffectiveAt;
-
-    /// @notice Pending replacement oracle admin, or address(0) when no rotation is pending.
-    address public pendingOracleAdmin;
-
-    /// @notice Earliest timestamp at which pendingOracleAdmin can be executed.
-    uint256 public oracleAdminRotationEffectiveAt;
 
     /// @dev A single checkpoint stores cumulative rate accumulators at a timestamp,
     ///      plus the Morpho share price recorded at that moment for auditability.
@@ -211,10 +194,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     error ZeroAToken();
     error ZeroUsdc();
     error ZeroMorphoVault();
-    error ZeroOracleAdmin();
-
-    /// @notice Reverts when a caller is not ORACLE_ADMIN.
-    error NotOracleAdmin(address caller);
 
     /// @notice Reverts when a setter would leave the current value unchanged.
     error NoChange();
@@ -231,27 +210,10 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     /// @notice Reverts when neither supported vault passes the oracle safety check.
     error NoSafeVault();
 
-    /// @notice Reverts when no pending oracle-admin rotation exists.
-    error OracleAdminRotationNotProposed();
-
-    /// @notice Reverts when an oracle-admin rotation is still timelocked.
-    error OracleAdminRotationNotReady(uint256 currentTime, uint256 effectiveAt);
-
-    /// @notice Reverts when an oracle-admin rotation is past its grace window.
-    error OracleAdminRotationExpired(uint256 currentTime, uint256 expiredAt);
-
-    /// @notice Reverts when a second oracle-admin rotation is proposed before the first resolves.
-    error OracleAdminRotationAlreadyPending(address pendingAdmin);
-
-    /// @notice Reverts because the emergency owner is the oracle-admin recovery path.
+    /// @notice Reverts because renouncing ownership would permanently destroy the
+    ///         admin role; the deployer is expected to use `transferOwnership`
+    ///         instead.
     error OwnershipRenouncementDisabled();
-
-    // ── Modifiers ────────────────────────────────────────────────────────────
-
-    modifier onlyOracleAdmin() {
-        _onlyOracleAdmin();
-        _;
-    }
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -259,29 +221,27 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     /// @param aToken      aUSDC address on Base.
     /// @param usdc        USDC address on Base.
     /// @param morphoVault MetaMorpho USDC vault address on Base.
-    /// @param oracleAdmin Operational admin allowed to update minDifferentialRay.
-    /// @param emergencyOwner Emergency owner allowed to rotate ORACLE_ADMIN.
+    /// @param admin       Admin authority over `minDifferentialRay`; expected to be
+    ///                    the protocol's 2-of-3 emergency multisig. Becomes the
+    ///                    initial `Ownable2Step` owner.
     constructor(
         address aavePool,
         address aToken,
         address usdc,
         address morphoVault,
-        address oracleAdmin,
-        address emergencyOwner
+        address admin
     )
-        Ownable(emergencyOwner)
+        Ownable(admin)
     {
         if (aavePool    == address(0)) revert ZeroAavePool();
         if (aToken      == address(0)) revert ZeroAToken();
         if (usdc        == address(0)) revert ZeroUsdc();
         if (morphoVault == address(0)) revert ZeroMorphoVault();
-        if (oracleAdmin == address(0)) revert ZeroOracleAdmin();
 
         AAVE_POOL    = IAaveV3Pool(aavePool);
         A_TOKEN      = IERC20(aToken);
         USDC         = IERC20(usdc);
         MORPHO_VAULT = IMorphoVault(morphoVault);
-        ORACLE_ADMIN = oracleAdmin;
 
         minDifferentialRay = DEFAULT_MIN_DIFFERENTIAL_RAY;
 
@@ -376,7 +336,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function setMinDifferentialRay(uint256 newValue) external override onlyOracleAdmin {
+    function setMinDifferentialRay(uint256 newValue) external override onlyOwner {
         _validateMinDifferentialRay(newValue);
 
         uint256 oldValue = minDifferentialRay;
@@ -395,7 +355,7 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
 
     /// @inheritdoc IDivigentYieldOracle
     /// @dev Permissionless by design: execution only applies a bounded change
-    ///      already scheduled by ORACLE_ADMIN. If the admin no longer wants the
+    ///      already scheduled by owner(). If the owner no longer wants the
     ///      change, they can cancel it before the timelock expires.
     function executeMinDifferentialRay() external override {
         uint256 pendingValue = pendingMinDifferentialRay;
@@ -409,60 +369,16 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     }
 
     /// @inheritdoc IDivigentYieldOracle
-    function cancelPendingMinDifferentialRay() external override onlyOracleAdmin {
+    function cancelPendingMinDifferentialRay() external override onlyOwner {
         uint256 pendingValue = pendingMinDifferentialRay;
         if (pendingValue == 0) revert NoPendingMinDifferentialRay();
 
         _cancelPendingMinDifferentialRay();
     }
 
-    /// @inheritdoc IDivigentYieldOracle
-    function proposeOracleAdminRotation(address newAdmin) external override onlyOwner {
-        if (newAdmin == address(0)) revert ZeroOracleAdmin();
-        if (newAdmin == ORACLE_ADMIN) revert NoChange();
-        if (pendingOracleAdmin != address(0)) {
-            revert OracleAdminRotationAlreadyPending(pendingOracleAdmin);
-        }
-
-        pendingOracleAdmin = newAdmin;
-        oracleAdminRotationEffectiveAt = block.timestamp + ORACLE_ADMIN_ROTATION_DELAY;
-
-        emit OracleAdminRotationProposed(ORACLE_ADMIN, newAdmin, oracleAdminRotationEffectiveAt);
-    }
-
-    /// @inheritdoc IDivigentYieldOracle
-    function executeOracleAdminRotation() external override {
-        address newAdmin = pendingOracleAdmin;
-        if (newAdmin == address(0)) revert OracleAdminRotationNotProposed();
-
-        uint256 effectiveAt = oracleAdminRotationEffectiveAt;
-        if (block.timestamp < effectiveAt) {
-            revert OracleAdminRotationNotReady(block.timestamp, effectiveAt);
-        }
-
-        uint256 expiredAt = effectiveAt + ORACLE_ADMIN_ROTATION_GRACE_PERIOD;
-        if (block.timestamp > expiredAt) {
-            revert OracleAdminRotationExpired(block.timestamp, expiredAt);
-        }
-
-        address oldAdmin = ORACLE_ADMIN;
-        ORACLE_ADMIN = newAdmin;
-        _clearPendingOracleAdminRotation();
-
-        emit OracleAdminUpdated(oldAdmin, newAdmin);
-    }
-
-    /// @inheritdoc IDivigentYieldOracle
-    function cancelOracleAdminRotation() external override onlyOwner {
-        if (pendingOracleAdmin == address(0)) revert OracleAdminRotationNotProposed();
-
-        address cancelled = pendingOracleAdmin;
-        _clearPendingOracleAdminRotation();
-
-        emit OracleAdminRotationCancelled(cancelled);
-    }
-
-    /// @notice Disabled to preserve the emergency recovery path for ORACLE_ADMIN.
+    /// @notice Disabled so the admin role cannot be accidentally destroyed.
+    ///         Ownership can still be transferred via `transferOwnership` /
+    ///         `acceptOwnership` from `Ownable2Step`.
     function renounceOwnership() public pure override {
         revert OwnershipRenouncementDisabled();
     }
@@ -539,11 +455,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
 
     // ── Internal: Admin Validation ───────────────────────────────────────────
 
-    /// @dev Reverts unless the caller is the current oracle admin.
-    function _onlyOracleAdmin() internal view {
-        if (msg.sender != ORACLE_ADMIN) revert NotOracleAdmin(msg.sender);
-    }
-
     /// @dev Enforces the hard-coded safety bounds for minDifferentialRay.
     function _validateMinDifferentialRay(uint256 value) internal pure {
         if (
@@ -582,12 +493,6 @@ contract DivigentYieldOracle is IDivigentYieldOracle, Ownable2Step {
     function _clearPendingMinDifferentialRay() internal {
         delete pendingMinDifferentialRay;
         delete pendingMinDifferentialRayEffectiveAt;
-    }
-
-    /// @dev Clears pending oracle-admin rotation state.
-    function _clearPendingOracleAdminRotation() internal {
-        delete pendingOracleAdmin;
-        delete oracleAdminRotationEffectiveAt;
     }
 
     // ── Internal: Rate Reading ────────────────────────────────────────────────

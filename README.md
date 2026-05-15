@@ -143,10 +143,10 @@ USDC treasury blacklist events.
   and Morpho shares are immutable contract claims with no admin steal
   vector.
 - **Non-upgradeable:** No proxy pattern. External integration addresses are
-  immutable. The fee treasury and oracle admin are rotatable via timelocked
-  control paths, with oracle-admin recovery governed by an OpenZeppelin
-  `Ownable2Step` emergency owner. Ownership renunciation is disabled so the
-  oracle-admin recovery path cannot be accidentally destroyed.
+  immutable. The fee treasury is rotatable via a timelocked control path.
+  Oracle parameter administration uses a single OpenZeppelin `Ownable2Step`
+  owner, with ownership renunciation disabled so the admin path cannot be
+  accidentally destroyed.
 - **Permissionless exit:** Withdrawals are never paused. The emergency
   multisig can only pause new deposits.
 - **ReentrancyGuard + CEI:** All state mutations occur before external

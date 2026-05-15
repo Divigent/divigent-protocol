@@ -70,7 +70,6 @@ contract TestBase is Test {
             address(aToken),
             address(usdc),
             address(morphoVault),
-            emergencyMultisig,
             emergencyMultisig
         );
     }
