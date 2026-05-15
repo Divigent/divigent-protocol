@@ -77,7 +77,6 @@ abstract contract ForkBase is Test, BaseAddresses {
             BASE_AAVE_ATOKEN_USDC,
             BASE_USDC,
             BASE_MORPHO_STEAKHOUSE,
-            multisig,
             multisig
         );
 
